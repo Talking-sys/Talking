@@ -1,9 +1,9 @@
-# Auth (M10 stages 0–1 + phone)
+# Auth (M10 stages 0–1 + phone + Google OIDC)
 
 Copyright (C) 2026 hateaboutyouone. Contact: hateaboutyou111@icloud.com.
 
-This document describes **what shipped** in the first auth PR and **what is left**.
-Google OAuth still requests only `openid email profile` — see `docs/GOOGLE_SCOPES.md`.
+This document describes **what shipped** in the auth PRs and **what is left**.
+Google Sign-In requests only `openid email profile` — see `docs/GOOGLE_SCOPES.md`.
 Commercial entitlements stay behind `COMMERCIAL_API_URL` and are keyed by opaque user UUIDs.
 
 The owner later **added phone number sign-in / sign-up**. Codes arrive by **SMS**.
@@ -17,7 +17,7 @@ production path).
 | `AUTH_MODE` | When | Behaviour |
 |---|---|---|
 | `local` (default in development and tests) | Home Wi-Fi translator, pytest, Playwright | Single user id (`USER_ID` or `local`). No cookies required. Existing chat/WS tests stay green. |
-| `accounts` | Hosted multi-user | Cookie sessions, CSRF, anonymous + phone. Missing WS cookies/tokens close the socket. |
+| `accounts` | Hosted multi-user | Cookie sessions, CSRF, anonymous + phone + Google (when configured). Missing WS cookies/tokens close the socket. |
 
 `AUTH_MODE=local` is **refused** when `APP_ENV=production`. Production also requires
 `APP_SECRET_KEY` (≥32 chars) and `LOG_SALT`. Production `accounts` requires `DATABASE_URL`.
@@ -30,18 +30,19 @@ unset, which defaults to console) is **refused** in production.
 - SQLAlchemy 2 (async, asyncpg) + Alembic.
 - Initial migration `001_auth_foundation`: `users`, `identities`, `sessions`,
   `recovery_codes`, `auth_events` (no PII, **90-day retention** comment),
-  `login_challenges` (phone OTP / future email codes).
+  `login_challenges` (phone OTP / future email codes). `002_google_oauth_states`
+  adds `oauth_states` (PKCE verifier encrypted, nonce hashed, ~10 min TTL).
 - `users.status` is `active | deleting | deleted`. Nickname unique and nullable.
   `profile_private` defaults true. User ids are UUIDs.
-- `identities` unique (`provider`, `subject`). Providers in this PR: `anonymous`, `phone`.
-  Email columns exist for later stages. Phone subject is `HMAC(phone)`; `phone_enc` is
+- `identities` unique (`provider`, `subject`). Providers: `anonymous`, `phone`, `google`.
+  Email columns are used for verified Google emails (HMAC + AES-GCM). Phone subject is
+  `HMAC(phone)`; Google subject is `HMAC(google_sub)`. `phone_enc` / `email_enc` are
   AES-GCM with `DB_ENCRYPTION_KEY` (hash-only if the key is missing).
 - Storage interface: in-memory (`AUTH_MODE=local` and tests) and Postgres (`AUTH_MODE=accounts`
   with `DATABASE_URL`).
 - CI runs Postgres and an Alembic upgrade / downgrade / upgrade test (`TEST_DATABASE_URL`).
 
-Passkeys, email `login_tokens`, OAuth states, and WebAuthn challenges are **not**
-implemented here (stubs only via unused identity providers).
+Passkeys, email `login_tokens`, and WebAuthn challenges are **not** implemented here.
 
 ## Stage 1 — sessions and server-side identity
 
@@ -120,12 +121,65 @@ Flow:
 
 Phones and codes are never logged. Identity `subject` is HMAC, not the number.
 
+## Google Sign-In (OIDC)
+
+**Off unless configured.** Empty client IDs, a non-HTTPS redirect URI, or
+`GOOGLE_OAUTH_ENABLED=0` leave `/api/auth/google` reporting `{enabled: false}` and
+`POST /api/auth/google/start` returns **503 `google_unconfigured`**. Production does
+**not** require Google. Use **separate Google Cloud projects** for development and
+production, and a **separate OAuth client ID per platform** (web / Android / iOS) —
+never reuse one client. Web is a confidential client (`GOOGLE_CLIENT_SECRET_WEB`);
+Android and iOS are public clients (PKCE only, no secret).
+
+Hard rules:
+
+- Scopes are exactly `openid email profile`. Incremental consent is not used; do not
+  add Gmail, Drive, Contacts, or `access_type=offline`.
+- Authorization **code** flow with **PKCE S256**, OAuth **state**, and ID-token **nonce**.
+- Redirect URIs are **HTTPS-only** and **exact-match** (no `http://`, no fragments).
+  The URI sent to Google is the configured value, never a client-supplied URL.
+- ID token checks: `iss` (`https://accounts.google.com` / `accounts.google.com`),
+  `aud` (the platform client ID for this dance), `exp` (60 s leeway), `nonce`,
+  RS256 signature via Google JWKS (`kid` lookup, refresh once on miss).
+- Google access / refresh / ID tokens stay on the server for the exchange and are
+  **discarded**. They are never written to cookies, JSON responses, redirects, or
+  `localStorage`. Session cookies remain the only browser credentials.
+- Identity lookup is `(provider=google, HMAC(sub))` only. **Matching emails do not
+  merge accounts.** Linking requires a signed-in user, a **fresh** session (≤10 min),
+  and `confirm: true` on start. If that Google account is already on another user →
+  **409 `google_taken`**.
+
+Flow:
+
+1. `GET /api/auth/google` — `{enabled, platforms, scopes}` (no client secrets).
+2. `POST /api/auth/google/start` `{platform?: "web"|"android"|"ios", intent?: "login"|"link", confirm?: true}`
+   — returns `{authorization_url, expires_in}`. Rate limit: **10 / hour / IP**.
+3. Google redirects to `GET /api/auth/google/callback?code&state` (browser: 303 to
+   `PUBLIC_ORIGIN/?auth=ok` with session cookies). Native clients may `POST` the
+   same path with `{code, state}` (`Accept: application/json` or `?format=json`
+   returns JSON). Rate limit: **20 / hour / IP**.
+4. `intent=link` attaches Google to the **current** user; `intent=login` signs in or
+   **creates** a user. Unlink: `DELETE /api/auth/methods/{id}`.
+
+Verified emails are stored HMAC + AES-GCM; unverified emails are dropped. Do not log
+ID tokens, `sub`, or client secrets (JWTs are redacted).
+
+Google Cloud Console (operator, not in this repo):
+
+| Project | Use |
+|---|---|
+| **Talking Dev** | Staging / LAN HTTPS. Separate web/Android/iOS clients. Redirect URI = the exact HTTPS callback (`https://<dev-host>/api/auth/google/callback`). Support email `hateaboutyou111@icloud.com`. |
+| **Talking Production** | Production domain only. Different client IDs and secret. Never copy Dev clients into prod env. Authorized JS origins and redirect URIs = production HTTPS only. |
+
+Fill `docs/GOOGLE_SCOPES.md` when the Console clients exist. Privacy `/privacy` and
+terms `/terms` templates already ship; counsel still owns the legal text (M16).
+
 ## Left for later stages (2–7)
 
 | Stage | Scope |
 |---|---|
 | 2 | Email magic link / one-time code (10 min, hashed). Reuse `login_challenges`. |
-| 3 | Google OAuth (`openid email profile` only). No auto-merge on email. |
+| 3 | Google OIDC — **shipped** (`openid email profile` only; no auto-merge). |
 | 4 | Passkeys / WebAuthn. |
 | 5 | Sign in with Apple, equal prominence, private relay. |
 | 6 | Onboarding screens (Google / Apple / email / passkey / phone / anonymous). |
@@ -134,13 +188,17 @@ Phones and codes are never logged. Identity `subject` is HMAC, not the number.
 ## Effort (implementation, not calendar)
 
 Stages 0–1 were scoped at about **2–3 focused days**. Phone is about **+1–1.5 days**
-(provider abstraction, E.164, abuse controls, link/no-merge). Remaining stages 2–7 are
-about **9–12 days** depending on Apple/Google console setup. Whole M10 plan including
-phone: roughly **12–16 days** of implementation once secrets and provider accounts exist.
+(provider abstraction, E.164, abuse controls, link/no-merge). Google OIDC is about
+**+1 day** (PKCE, JWKS, link/no-merge, mocked endpoints). Remaining stages 2 and 4–7
+are about **7–10 days** depending on Apple console setup. Whole M10 plan including
+phone and Google: roughly **12–16 days** of implementation once secrets and provider
+accounts exist.
 
 ## Env (placeholders only — never commit real values)
 
 See `.env.example`: `AUTH_MODE`, `PUBLIC_ORIGIN`, `LOG_SALT`, `DB_ENCRYPTION_KEY`,
 `DATABASE_URL`, `APP_SECRET_KEY`, `SMS_PROVIDER`, `TWILIO_ACCOUNT_SID`,
 `TWILIO_AUTH_TOKEN`, `TWILIO_VERIFY_SERVICE_SID`, `SMS_COUNTRY_ALLOWLIST`,
-`SMS_DEFAULT_REGION`.
+`SMS_DEFAULT_REGION`, `GOOGLE_OAUTH_ENABLED`, `GOOGLE_CLIENT_ID_WEB` /
+`GOOGLE_CLIENT_ID_ANDROID` / `GOOGLE_CLIENT_ID_IOS`, `GOOGLE_CLIENT_SECRET_WEB`,
+`GOOGLE_REDIRECT_URI` (optional per-platform `GOOGLE_REDIRECT_URI_*`).

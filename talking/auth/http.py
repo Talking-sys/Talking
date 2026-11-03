@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import logging
 from fastapi import FastAPI, HTTPException, Request, Response
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, RedirectResponse
 
 from talking.db import make_engine, make_session_factory
 from talking.security import client_ip, sign
@@ -20,6 +20,7 @@ from .crypto import (
 )
 from .deps import AuthMiddleware, read_refresh_cookie, require_user
 from .logfilter import install_auth_log_filter
+from .google import GoogleOidc, validate_google_settings
 from .phone_util import PhoneError, country_allowed, normalize_phone_channel, parse_e164
 from .providers import build_phone_provider, sms_provider_name, twilio_configured
 from .rate_limit import AuthRateLimiter
@@ -58,6 +59,7 @@ def validate_auth_settings(settings) -> None:
                 "TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, and TWILIO_VERIFY_SERVICE_SID "
                 "are required when APP_ENV=production"
             )
+    validate_google_settings(settings)
 
 
 def _https_request(request: Request) -> bool:
@@ -120,6 +122,7 @@ def build_auth_stack(settings, secret: bytes):
     svc = AuthService(
         store, secret=secret, log_salt=salt, enc_key=enc,
         phone_provider=build_phone_provider(settings),
+        google=GoogleOidc(settings),
         sign_fn=sign, allow_debug_otp=allow_debug,
     )
     limiter = AuthRateLimiter(settings.redis_url)
@@ -329,6 +332,61 @@ def register_auth(app: FastAPI) -> None:
         except AuthError as e:
             raise _err(e)
 
+    @app.get("/api/auth/google")
+    async def google_status():
+        accounts = (s.auth_mode or "local").strip().lower() == "accounts"
+        return svc.google_status(accounts=accounts)
+
+    @app.post("/api/auth/google/start")
+    async def google_start(request: Request):
+        if (s.auth_mode or "local").strip().lower() != "accounts":
+            raise HTTPException(400, "accounts_only")
+        data = await _json(request)
+        ip = client_ip(request)
+        if not limiter.allow(f"auth:google:start:{ip}", 10, 3600):
+            raise HTTPException(429, "rate limit")
+        uid = getattr(request.state, "user", None)
+        try:
+            return await svc.start_google(
+                platform=str(data.get("platform") or "web"),
+                intent=str(data.get("intent") or "login"),
+                confirm=data.get("confirm") is True,
+                user_id=(uid.id if uid and uid.authenticated else None),
+                session=(uid.session if uid and uid.authenticated else None),
+                ip=ip,
+            )
+        except AuthError as e:
+            raise _err(e)
+
+    @app.api_route("/api/auth/google/callback", methods=["GET", "POST"])
+    async def google_callback(request: Request):
+        if (s.auth_mode or "local").strip().lower() != "accounts":
+            if _wants_json(request) or request.method == "POST":
+                raise HTTPException(400, "accounts_only")
+            return _google_result(request, error="accounts_only", status=400)
+        if request.method == "POST":
+            data = await _json(request)
+            code = str(data.get("code") or "")
+            state = str(data.get("state") or "")
+            error = str(data.get("error") or "")
+        else:
+            code = str(request.query_params.get("code") or "")
+            state = str(request.query_params.get("state") or "")
+            error = str(request.query_params.get("error") or "")
+        ip = client_ip(request)
+        if not limiter.allow(f"auth:google:cb:{ip}", 20, 3600):
+            return _google_result(request, error="rate limit", status=429)
+        uid = getattr(request.state, "user", None)
+        try:
+            out = await svc.finish_google(
+                code=code, state=state, error=error, ip=ip,
+                user_agent=request.headers.get("user-agent"),
+                current_user_id=(uid.id if uid and uid.authenticated else None),
+            )
+        except AuthError as e:
+            return _google_result(request, error=e.code, status=e.status)
+        return _google_result(request, body=out)
+
 
 async def _json(request: Request) -> dict:
     if not (request.headers.get("content-type") or "").startswith("application/json"):
@@ -340,5 +398,48 @@ async def _json(request: Request) -> dict:
     if not isinstance(data, dict):
         raise HTTPException(400, "invalid JSON")
     return data
+
+
+def _wants_json(request: Request) -> bool:
+    if request.method == "POST":
+        return True
+    accept = (request.headers.get("accept") or "").lower()
+    if "application/json" in accept:
+        return True
+    if request.query_params.get("format") == "json":
+        return True
+    return False
+
+
+def _google_landing(request: Request, *, ok: bool, reason: str = "") -> str:
+    settings = request.app.state.settings
+    base = (getattr(settings, "public_origin", "") or "").strip().rstrip("/")
+    if not base:
+        base = str(request.base_url).rstrip("/")
+    if ok:
+        return f"{base}/?auth=ok"
+    return f"{base}/?auth=error&reason={reason}"
+
+
+def _google_result(request: Request, body: dict | None = None, error: str | None = None, status: int = 200):
+    """JSON for API/native clients; cookie-setting redirect for the browser callback."""
+    json_ok = _wants_json(request)
+    if error:
+        if json_ok:
+            return JSONResponse({"detail": error}, status_code=status)
+        return RedirectResponse(_google_landing(request, ok=False, reason=error), status_code=303)
+    assert body is not None
+    if json_ok:
+        if "session" in body:
+            return attach_session_response(request, body, 201 if body.get("created") else 200)
+        return JSONResponse(body, status_code=status)
+    dest = _google_landing(request, ok=True)
+    resp = RedirectResponse(dest, status_code=303)
+    if "session" in body:
+        svc: AuthService = request.app.state.auth
+        sess = body["session"]
+        refresh = body["refresh"]
+        set_session_cookies(resp, request, svc.access_token(sess), refresh)
+    return resp
 
 

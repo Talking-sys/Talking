@@ -9,6 +9,7 @@ from .crypto import user_log_id
 _EMAIL = re.compile(r"[\w.+-]+@[\w-]+\.[\w.-]+")
 _PHONE = re.compile(r"\+?\d[\d\s\-().]{7,}\d")
 _BEARER = re.compile(r"(Bearer\s+)[A-Za-z0-9._\-+=/]+", re.I)
+_JWT = re.compile(r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b")
 _CODE = re.compile(r"\b(\d{6})\b")
 _RECOVERY = re.compile(r"\b[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}\b", re.I)
 
@@ -26,6 +27,7 @@ class RedactFilter(logging.Filter):
         msg = _EMAIL.sub("[redacted-email]", msg)
         msg = _PHONE.sub("[redacted-phone]", msg)
         msg = _BEARER.sub(r"\1[redacted]", msg)
+        msg = _JWT.sub("[redacted-jwt]", msg)
         msg = _RECOVERY.sub("[redacted-code]", msg)
         msg = _CODE.sub("[redacted]", msg)
         record.msg = msg
