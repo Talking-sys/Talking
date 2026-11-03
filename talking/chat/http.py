@@ -18,10 +18,15 @@ from .translation_cache import MessageTranslationCache
 
 
 def _can_access(store: MessageStore, user_id: str, conversation_id: str) -> bool:
-    """File-backed ChatStore is already namespaced by user. In-memory tests share a dict."""
-    if getattr(store, "_chat", None) is not None:
-        return True
+    """File-backed ChatStore is namespaced by user; direct dialogs check membership."""
     conv = conversation_id or DEFAULT_CONVERSATION
+    chat = getattr(store, "_chat", None)
+    if chat is not None:
+        try:
+            chat.get_dialog(user_id, conv)
+            return True
+        except (KeyError, ValueError):
+            return conv in (DEFAULT_CONVERSATION, user_id, "local")
     if conv in (DEFAULT_CONVERSATION, user_id, "local"):
         return True
     msgs = store.list(conv, limit=store.max_per_conversation, user_id=user_id)
@@ -97,6 +102,8 @@ def register_message_routes(
             raise HTTPException(403, "sender_id spoofing")
         sender = uid
         conv = str(data.get("conversation_id") or DEFAULT_CONVERSATION)[:64]
+        if not _can_access(store, uid, conv):
+            raise HTTPException(403, "not a participant")
         urls = extract_urls(text)
         preview = None
         if urls:
@@ -160,6 +167,13 @@ def register_message_routes(
             msg.urls = urls
             msg.preview = preview
             public = msg.to_dict()
-            hub.publish_edit(public)
+            extra: list[str] = []
+            chat = getattr(store, "_chat", None)
+            if chat is not None:
+                try:
+                    extra = list(chat.participants(uid, msg.dialog_id))
+                except (KeyError, ValueError):
+                    extra = []
+            hub.publish_edit(public, extra_user_ids=extra)
             return {"ok": True, "message": public, "changed": True}
         return {"ok": True, "message": msg.to_dict(), "changed": False}

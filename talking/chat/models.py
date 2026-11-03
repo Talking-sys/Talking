@@ -1,4 +1,4 @@
-"""Dialog + message records for the notes slice.
+"""Dialog + message records for the notes slice and M4 1:1 chat.
 
 One message model for notes, link previews, edits, and transcription.
 Canonical discriminator is ``kind``; ``type`` is an alias. Canonical
@@ -14,7 +14,10 @@ from .edits import public_edit_fields
 
 MESSAGE_TYPES = ("text", "voice_note", "video_note")
 NOTE_TYPES = ("voice_note", "video_note")
-_ALIAS_KEYS = ("play_url", "kind", "type", "conversation_id", "dialog_id", "edited")
+_ALIAS_KEYS = (
+    "play_url", "kind", "type", "conversation_id", "dialog_id", "edited",
+    "unread_count", "peer", "last_message",
+)
 
 
 @dataclass
@@ -23,9 +26,53 @@ class Dialog:
     title: str
     created_at: float
     updated_at: float
+    kind: str = "local"  # local | direct
+    participants: list[str] = field(default_factory=list)
+    last_message_id: str | None = None
+    last_sender_id: str | None = None
+    last_preview: str = ""
+    last_type: str | None = None
+    prefs: dict[str, Any] = field(default_factory=dict)
 
-    def to_public(self) -> dict[str, Any]:
-        return asdict(self)
+    def to_public(self, *, viewer_id: str | None = None, extra: dict[str, Any] | None = None) -> dict[str, Any]:
+        d = {
+            "id": self.id,
+            "title": self.title,
+            "created_at": self.created_at,
+            "updated_at": self.updated_at,
+            "kind": self.kind,
+        }
+        if self.kind == "direct":
+            d["participants"] = list(self.participants)
+        if extra:
+            d.update(extra)
+        if viewer_id and self.kind == "direct":
+            d.setdefault("peer_id", next((p for p in self.participants if p != viewer_id), None))
+        return d
+
+    def to_storage(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "title": self.title,
+            "created_at": self.created_at,
+            "updated_at": self.updated_at,
+            "kind": self.kind,
+            "participants": list(self.participants),
+            "last_message_id": self.last_message_id,
+            "last_sender_id": self.last_sender_id,
+            "last_preview": self.last_preview,
+            "last_type": self.last_type,
+            "prefs": dict(self.prefs or {}),
+        }
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> "Dialog":
+        known = {f.name for f in cls.__dataclass_fields__.values()}  # type: ignore[attr-defined]
+        kw = {k: v for k, v in d.items() if k in known}
+        kw.setdefault("kind", "local")
+        kw.setdefault("participants", list(d.get("participants") or []))
+        kw.setdefault("prefs", dict(d.get("prefs") or {}))
+        return cls(**kw)
 
 
 @dataclass
@@ -60,6 +107,11 @@ class Message:
     original_text: str | None = None
     revisions: list[dict] = field(default_factory=list)
     extra: dict[str, Any] = field(default_factory=dict)
+    # Per (message, target_lang) cache persisted on the row.
+    translations: dict[str, Any] = field(default_factory=dict)
+    delivered_at: float | None = None
+    read_at: float | None = None
+    deleted_at: float | None = None
 
     @property
     def kind(self) -> str:
@@ -77,7 +129,7 @@ class Message:
     def conversation_id(self, value: str) -> None:
         self.dialog_id = value or self.dialog_id
 
-    def to_public(self, play_url: str | None = None) -> dict[str, Any]:
+    def to_public(self, play_url: str | None = None, *, viewer_id: str | None = None) -> dict[str, Any]:
         d = {
             "id": self.id,
             "dialog_id": self.dialog_id,
@@ -109,6 +161,17 @@ class Message:
         d.update(public_edit_fields(self))
         if play_url:
             d["play_url"] = play_url
+        if self.delivered_at:
+            d["delivered_at"] = self.delivered_at
+        if self.read_at:
+            d["read_at"] = self.read_at
+        if viewer_id and viewer_id == self.sender_id:
+            if self.read_at:
+                d["receipt"] = "read"
+            elif self.delivered_at:
+                d["receipt"] = "delivered"
+            else:
+                d["receipt"] = "sent"
         return d
 
     def to_dict(self) -> dict[str, Any]:
@@ -119,8 +182,13 @@ class Message:
         """JSONL row: public fields plus private edit history, no play_url."""
         d = self.to_public()
         d.pop("play_url", None)
+        d.pop("receipt", None)
         d["original_text"] = self.original_text
         d["revisions"] = list(self.revisions or [])
+        d["translations"] = dict(self.translations or {})
+        d["delivered_at"] = self.delivered_at
+        d["read_at"] = self.read_at
+        d["deleted_at"] = self.deleted_at
         return d
 
     def to_admin(self) -> dict[str, Any]:
@@ -138,6 +206,7 @@ class Message:
         kw = {k: v for k, v in data.items() if k in known}
         extra = {k: v for k, v in data.items() if k not in known and k not in _ALIAS_KEYS}
         kw.setdefault("extra", extra)
+        kw.setdefault("translations", dict(data.get("translations") or extra.pop("translations", {}) or {}))
         return cls(**kw)
 
 
@@ -145,6 +214,7 @@ ADMIN_REDACT_FIELDS = (
     "transcript", "translation", "src_lang", "tgt_lang", "translation_provider",
     "transcript_status", "transcript_reason", "transcript_provider",
     "transcript_model", "transcript_created_at", "transcript_duration",
+    "text", "original_text", "translations", "preview", "urls",
 )
 
 
@@ -152,6 +222,7 @@ def redact_for_admin(public: dict[str, Any]) -> dict[str, Any]:
     """Strip speech-to-text fields so an admin panel cannot read note text."""
     out = {k: v for k, v in public.items() if k not in ADMIN_REDACT_FIELDS}
     out["transcript_redacted"] = True
+    out["content_redacted"] = True
     return out
 
 
@@ -174,3 +245,14 @@ def transcript_view(msg: Message) -> dict[str, Any]:
         "duration": msg.transcript_duration,
         "reason": msg.transcript_reason,
     }
+
+
+def preview_text(msg: Message, *, limit: int = 80) -> str:
+    if msg.type == "voice_note":
+        return "Voice note"
+    if msg.type == "video_note":
+        return "Video note"
+    body = (msg.text or "").replace("\n", " ").strip()
+    if len(body) <= limit:
+        return body
+    return body[: limit - 1] + "…"
