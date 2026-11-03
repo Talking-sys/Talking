@@ -4,7 +4,6 @@ from __future__ import annotations
 import json
 import os
 import threading
-import uuid
 from pathlib import Path
 
 from .config import DEFAULT_WHISPER_MODEL, WHISPER_MODELS
@@ -54,7 +53,8 @@ class SettingsStore:
         if env_uid:
             self.data["user_id"] = env_uid
         if not self.data.get("user_id"):
-            self.data["user_id"] = "anon-" + uuid.uuid4().hex[:10]
+            # Single-user local mode. Opaque UUIDs are minted in AUTH_MODE=accounts.
+            self.data["user_id"] = "local"
         self.data["pause_ms"] = clamp_pause(self.data.get("pause_ms"))
         self.data["whisper_model"] = clamp_model(self.data.get("whisper_model"))
         self.save()

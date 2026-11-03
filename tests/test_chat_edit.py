@@ -76,10 +76,29 @@ def test_identical_text_is_noop(make_client):
 
 def test_not_author_403(make_client):
     c = make_client(env={"UNFURL_STUB": "1"})
-    msg = _post(c, "secret", sender_id="alice")
-    r = c.patch(f"/api/chat/messages/{msg['id']}", json={"text": "nope", "sender_id": "bob"})
+    store = c.app_.state.messages
+    seeded = store.add(text="secret", sender_id="alice")
+    r = c.patch(f"/api/chat/messages/{seeded.id}", json={"text": "nope", "sender_id": "alice"})
     assert r.status_code == 403
-    assert "author" in r.json()["detail"]
+    detail = r.json()["detail"]
+    assert "author" in detail or "spoof" in detail
+
+
+def test_sender_id_spoofing_403(make_client):
+    c = make_client(env={"UNFURL_STUB": "1"})
+    store = c.app_.state.messages
+    seeded = store.add(text="secret", sender_id="other-user")
+    r = c.patch(
+        f"/api/chat/messages/{seeded.id}",
+        json={"text": "hacked", "sender_id": "other-user"},
+    )
+    assert r.status_code == 403
+    assert store.get(seeded.id).text == "secret"
+    spoof_post = c.post("/api/chat/messages", json={"text": "hi", "sender_id": "admin"})
+    assert spoof_post.status_code == 403
+    own = c.post("/api/chat/messages", json={"text": "hi"})
+    assert own.status_code == 200
+    assert own.json()["message"]["sender_id"] == "local"
 
 
 def test_unknown_id_404(make_client):

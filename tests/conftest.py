@@ -9,6 +9,7 @@ sys.path.insert(0, str(ROOT))
 os.environ.setdefault("APP_TRANSLATE_PROVIDERS", "stub")
 os.environ.setdefault("APP_TTS_PROVIDERS", "")
 os.environ.setdefault("APP_ENV", "test")
+os.environ.setdefault("AUTH_MODE", "local")
 os.environ.setdefault("WHISPER_MODEL", "base")
 
 
@@ -24,10 +25,11 @@ def make_client(tmp_path, monkeypatch):
 
     n = {"i": 0}
 
-    def _make(stt=None, translator=None, env=None, unfurl=None, messages=None, tts=None):
+    def _make(stt=None, translator=None, env=None, unfurl=None, messages=None, tts=None,
+              base_url="http://testserver"):
         n["i"] += 1
         for k, v in (env or {}).items():
-            monkeypatch.setenv(k, v)
+            monkeypatch.setenv(k, str(v))
         monkeypatch.setenv("APP_DATA_DIR", str(tmp_path / f"data{n['i']}"))
         monkeypatch.setenv("APP_TRANSLATE_PROVIDERS", "stub")
         s = Settings()
@@ -35,7 +37,7 @@ def make_client(tmp_path, monkeypatch):
         fake = stt or FakeSTTEngine(s, default_text="hello", default_lang="en")
         eng = Engine(s, translator=tr, stt=fake, tts=tts, start_background=False)
         app = create_app(s, eng, unfurl=unfurl, messages=messages)
-        c = TestClient(app)
+        c = TestClient(app, base_url=base_url)
         c.eng = eng
         c.app_ = app
         c.stt = fake

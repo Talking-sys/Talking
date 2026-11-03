@@ -24,10 +24,12 @@ import uuid
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 
+from talking.auth import authenticate_websocket
+from talking.auth.deps import require_user
 from talking.commercial.client import ENTITLEMENT_VOICE_TRANSCRIPTION
 from talking.ids import check_id
 from talking.languages import WHISPER_LANGUAGES
-from talking.security import TokenBucket, client_ip, unsign
+from talking.security import TokenBucket, client_ip
 
 from . import PARTIAL
 from .events import ensure_hub
@@ -53,16 +55,8 @@ def _http(err: MediaError | ValueError | KeyError) -> HTTPException:
     return HTTPException(400, str(err))
 
 
-def _uid_from_app(app: FastAPI) -> str:
-    uid = app.state.engine.store.get("user_id") or "local"
-    try:
-        return check_id(uid)
-    except ValueError:
-        return "local"
-
-
 def _user_id(request: Request) -> str:
-    return _uid_from_app(request.app)
+    return require_user(request).id
 
 
 def _public_message(app: FastAPI, user_id: str, msg: Message) -> dict:
@@ -483,24 +477,18 @@ def register_chat(app: FastAPI) -> None:
 
     @app.websocket("/ws/chat")
     async def ws_chat(ws: WebSocket, t: str = ""):
-        s = app.state.settings
-        origins = [o.strip() for o in s.cors_origins.split(",") if o.strip()]
-        origin = ws.headers.get("origin")
-        host = ws.headers.get("host", "")
-        allowed = set(origins) | {f"https://{host}", f"http://{host}"}
-        if origin and origin not in allowed:
-            await ws.close(code=1008, reason="origin")
-            return
-        tok = unsign(app.state.secret, t, "ws") if t else {"u": _uid_from_app(app)}
-        if t and not tok:
+        ctx = await authenticate_websocket(ws, t)
+        if ctx is None or not ctx.authenticated:
             await ws.close(code=1008, reason="handshake")
             return
-        uid = (tok or {}).get("u") or _uid_from_app(app)
+        uid = ctx.id
         try:
             uid = check_id(uid)
         except ValueError:
-            uid = "local"
+            await ws.close(code=1008, reason="handshake")
+            return
         await ws.accept()
+        app.state.auth_sockets.add(ws, uid, ctx.session_id)
         q: asyncio.Queue = asyncio.Queue(maxsize=200)
         hub: ChatHub = app.state.chat_hub
         hub.subscribe(uid, q)
@@ -530,6 +518,7 @@ def register_chat(app: FastAPI) -> None:
         except WebSocketDisconnect:
             pass
         finally:
+            app.state.auth_sockets.discard(ws)
             hub.unsubscribe(uid, q)
             hub.unsubscribe("*", q)
             send_task.cancel()

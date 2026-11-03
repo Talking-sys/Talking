@@ -5,6 +5,8 @@ import time
 
 from fastapi import FastAPI, HTTPException, Request
 
+from talking.auth.deps import require_user
+
 from ..security import TokenBucket, client_ip
 from ..unfurl.service import UnfurlService
 from ..unfurl.ssrf import SSRFError
@@ -13,6 +15,19 @@ from .edits import EditError, first_url_changed
 from .events import ChatHub, ensure_hub
 from .messages import DEFAULT_CONVERSATION, MAX_TEXT, MessageStore
 from .translation_cache import MessageTranslationCache
+
+
+def _can_access(store: MessageStore, user_id: str, conversation_id: str) -> bool:
+    """File-backed ChatStore is already namespaced by user. In-memory tests share a dict."""
+    if getattr(store, "_chat", None) is not None:
+        return True
+    conv = conversation_id or DEFAULT_CONVERSATION
+    if conv in (DEFAULT_CONVERSATION, user_id, "local"):
+        return True
+    msgs = store.list(conv, limit=store.max_per_conversation, user_id=user_id)
+    if not msgs:
+        return True
+    return any(m.sender_id == user_id for m in msgs)
 
 
 def _refresh_preview(unfurl: UnfurlService, text: str, old_urls: list[str], old_preview: dict | None):
@@ -48,10 +63,15 @@ def register_message_routes(
 
     @app.get("/api/chat/messages")
     def list_messages(request: Request, conversation_id: str = DEFAULT_CONVERSATION, limit: int = 50):
+        uid = require_user(request).id
+        conv = conversation_id or DEFAULT_CONVERSATION
+        if not _can_access(store, uid, conv):
+            raise HTTPException(403, "not a participant")
         return {
             "ok": True,
-            "conversation_id": conversation_id or DEFAULT_CONVERSATION,
-            "messages": [m.to_dict() for m in store.list(conversation_id, limit)],
+            "conversation_id": conv,
+            "user_id": uid,
+            "messages": [m.to_dict() for m in store.list(conv, limit, user_id=uid)],
             "edit_window_s": _window(request),
             "max_text": MAX_TEXT,
         }
@@ -60,6 +80,7 @@ def register_message_routes(
     async def post_message(request: Request):
         if not limiter.allow(client_ip(request)):
             raise HTTPException(429, "rate limit")
+        uid = require_user(request).id
         try:
             data = await request.json()
         except Exception:
@@ -71,7 +92,10 @@ def register_message_routes(
             raise HTTPException(400, "empty")
         if len(text) > MAX_TEXT:
             raise HTTPException(400, "text too long")
-        sender = str(data.get("sender_id") or "local")[:64]
+        claimed = data.get("sender_id")
+        if claimed is not None and str(claimed) and str(claimed) != uid:
+            raise HTTPException(403, "sender_id spoofing")
+        sender = uid
         conv = str(data.get("conversation_id") or DEFAULT_CONVERSATION)[:64]
         urls = extract_urls(text)
         preview = None
@@ -86,6 +110,7 @@ def register_message_routes(
             conversation_id=conv,
             urls=urls,
             preview=preview,
+            user_id=uid,
         )
         return {"ok": True, "message": msg.to_dict()}
 
@@ -93,6 +118,7 @@ def register_message_routes(
     async def patch_message(message_id: str, request: Request):
         if not edit_limiter.allow(client_ip(request)):
             raise HTTPException(429, "rate limit")
+        uid = require_user(request).id
         try:
             data = await request.json()
         except Exception:
@@ -101,12 +127,17 @@ def register_message_routes(
             raise HTTPException(400, "invalid JSON")
         if "text" not in data:
             raise HTTPException(422, "text required")
-        sender = str(data.get("sender_id") or "local")[:64]
+        claimed = data.get("sender_id")
+        if claimed is not None and str(claimed) and str(claimed) != uid:
+            raise HTTPException(403, "sender_id spoofing")
+        sender = uid
         conv = data.get("conversation_id")
         conv_s = str(conv)[:64] if conv else None
-        old = store.get(message_id, conv_s)
+        old = store.get(message_id, conv_s, user_id=uid)
         if old is None:
             raise HTTPException(404, "message not found")
+        if old.sender_id != uid:
+            raise HTTPException(403, "not the author")
         old_text = old.text
         old_urls = list(old.urls)
         old_preview = old.preview
@@ -119,6 +150,7 @@ def register_message_routes(
                 window_s=_window(request),
                 max_text=MAX_TEXT,
                 conversation_id=conv_s,
+                user_id=uid,
             )
         except EditError as e:
             raise HTTPException(e.status, e.message) from e

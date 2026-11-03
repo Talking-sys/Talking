@@ -98,6 +98,19 @@ class Settings:
     database_url: str = field(default_factory=lambda: _env("DATABASE_URL", ""))
     redis_url: str = field(default_factory=lambda: _env("REDIS_URL", ""))
 
+    # M10 auth. `local` is the single-user home Wi-Fi translator (tests/dev default).
+    # `accounts` enables cookies, CSRF, and phone/anonymous sign-in.
+    auth_mode: str = field(default_factory=lambda: _env("AUTH_MODE", "local"))
+    public_origin: str = field(default_factory=lambda: _env("PUBLIC_ORIGIN", ""))
+    log_salt: str = field(default_factory=lambda: _env("LOG_SALT", ""))
+    db_encryption_key: str = field(default_factory=lambda: _env("DB_ENCRYPTION_KEY", ""))
+    sms_provider: str = field(default_factory=lambda: _env("SMS_PROVIDER", "console"))
+    twilio_account_sid: str = field(default_factory=lambda: _env("TWILIO_ACCOUNT_SID", ""))
+    twilio_auth_token: str = field(default_factory=lambda: _env("TWILIO_AUTH_TOKEN", ""))
+    twilio_verify_service_sid: str = field(default_factory=lambda: _env("TWILIO_VERIFY_SERVICE_SID", ""))
+    sms_country_allowlist: str = field(default_factory=lambda: _env("SMS_COUNTRY_ALLOWLIST", ""))
+    sms_default_region: str = field(default_factory=lambda: _env("SMS_DEFAULT_REGION", ""))
+
     s3_endpoint: str = field(default_factory=lambda: _env("S3_ENDPOINT", ""))
     s3_bucket: str = field(default_factory=lambda: _env("S3_BUCKET", ""))
     s3_region: str = field(default_factory=lambda: _env("S3_REGION", ""))
