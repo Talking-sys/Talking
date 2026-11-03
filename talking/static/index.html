@@ -7,6 +7,8 @@
   <title>{{APP_NAME}}</title>
   <link rel="icon" href="/static/logo.svg" type="image/svg+xml">
   <link rel="stylesheet" href="/static/app.css">
+  <link rel="stylesheet" href="/static/link-preview.css">
+  <link rel="stylesheet" href="/static/chat-edit.css">
 </head>
 <body>
   <header class="top">
@@ -55,7 +57,37 @@
       <div id="feed" class="feed" aria-live="polite"></div>
       <p id="empty" class="empty">Нажмите микрофон и говорите. Распознанный текст и перевод появятся здесь.</p>
     </section>
+
+    <!-- link-preview PR: isolated pane. M4 / voice-note PRs should keep this id. -->
+    <section class="preview-chat card" id="previewChat" data-module="link-preview">
+      <h2>Чат <small>превью ссылок</small></h2>
+      <p class="hint">Сообщение со ссылкой показывает карточку (заголовок, описание, картинка). Нажмите карточку — мини-браузер.</p>
+      <div id="chatFeed" class="chat-feed" aria-live="polite"></div>
+      <div id="editBanner" class="edit-banner" hidden>
+        <span class="edit-banner-icon" aria-hidden="true">✎</span>
+        <div class="edit-banner-body">
+          <div class="edit-banner-title" id="editBannerTitle">Редактирование</div>
+          <div class="edit-banner-preview" id="editBannerPreview"></div>
+        </div>
+        <button type="button" id="editCancel" class="edit-cancel" aria-label="Отменить редактирование">×</button>
+      </div>
+      <form id="chatForm" class="chat-form" autocomplete="off">
+        <input id="chatInput" type="text" maxlength="500" placeholder="Напишите сообщение со ссылкой…" aria-label="Текст сообщения">
+        <button type="submit" id="chatSend">Отправить</button>
+      </form>
+    </section>
+    <div id="chatMenu" class="chat-menu" hidden role="menu" aria-label="Действия с сообщением"></div>
   </main>
+
+  <div id="miniBrowser" class="mini-browser" hidden>
+    <div class="mb-bar" id="mbBar">
+      <button type="button" id="mbBack" aria-label="Назад">←</button>
+      <span id="mbUrl" class="mb-url" title=""></span>
+      <button type="button" id="mbExternal" class="mb-ext">Открыть снаружи</button>
+      <button type="button" id="mbClose" aria-label="Закрыть">✕</button>
+    </div>
+    <iframe id="mbFrame" sandbox referrerpolicy="no-referrer" title="Мини-браузер"></iframe>
+  </div>
 
   <div id="toast" class="toast" hidden></div>
   <footer>
@@ -63,5 +95,7 @@
   </footer>
   <script src="/static/vad.js"></script>
   <script src="/static/app.js"></script>
+  <script src="/static/chat-edit.js"></script>
+  <script src="/static/link-preview.js"></script>
 </body>
 </html>

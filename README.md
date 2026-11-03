@@ -4,7 +4,7 @@ Real-time two-way speech translation. **Open core, GPL v3.**
 
 Copyright (C) 2026 hateaboutyouone. Contact: **hateaboutyou111@icloud.com**.
 
-Stage **v0.1.0** is a runnable skeleton: FastAPI + WebSocket, Whisper STT, Grok/free/stub translation, 3-minute buffer, offline JSONL queue, mobile-first HTML mic UI. A thin **chat notes** slice (`/chat`) adds Telegram-style voice notes and round video notes (кружочки). Full chat, games, auth, and all monetization ship as later modules (`docs/ROADMAP.md`). Commercial admin / licensing / Talk-coins / P2P / analytics live in a **separate proprietary repo** and talk to this core **only over HTTP/WS** — see `docs/ARCHITECTURE.md` and `NOTICE.md`.
+Stage **v0.1.0** is a runnable skeleton: FastAPI + WebSocket, Whisper STT, Grok/free/stub translation, 3-minute buffer, offline JSONL queue, mobile-first HTML mic UI. A thin **chat notes** slice (`/chat`) adds Telegram-style voice notes and round video notes (кружочки). A **link-preview** module unfurls URLs server-side (Open Graph / Twitter Card / oEmbed) with SSRF guards, a Telegram-style card, and a sandboxed mini-browser. Own **text messages can be edited** (PATCH, «изменено» / edited, 48 h window). Full chat, games, auth, and all monetization ship as later modules (`docs/ROADMAP.md`). Commercial admin / licensing / Talk-coins / P2P / analytics live in a **separate proprietary repo** and talk to this core **only over HTTP/WS** — see `docs/ARCHITECTURE.md` and `NOTICE.md`.
 
 This README is not legal advice.
 
@@ -32,7 +32,7 @@ Tests (fake STT + stub translator, no model download):
 
 ```bash
 pytest -q
-# notes smoke uses Playwright Chromium + fake media devices:
+# notes / preview smoke uses Playwright Chromium + fake media devices:
 python -m playwright install chromium   # once
 ```
 
@@ -59,10 +59,15 @@ Compose sets `DATABASE_URL` and `REDIS_URL`. The app still runs if those pings f
 | `APP_BUFFER_SECONDS` | `180` | Live + offline ring |
 | `APP_TTS` / `APP_TTS_PROVIDERS` | off / empty | Default = browser. Set `gtts` for MIT server TTS |
 | `DATABASE_URL` | empty | Postgres/Neon. Empty = local files |
-| `REDIS_URL` | empty | Optional |
+| `REDIS_URL` | empty | Optional. Unfurl cache uses Redis when set, else in-memory |
 | `S3_ENDPOINT` `S3_BUCKET` `S3_ACCESS_KEY` `S3_SECRET_KEY` `S3_REGION` | empty | R2/MinIO/AWS archive. Empty = local JSONL |
 | `COMMERCIAL_API_URL` / `COMMERCIAL_API_TOKEN` / `COMMERCIAL_WEBHOOK_SECRET` | empty | Proprietary service. Empty = stubs |
 | `APP_SECRET_KEY` | auto file | HMAC for WS tokens (do not commit) |
+| `UNFURL_STUB` | `0` | `1` skips outbound HTTP (tests / demo cards) |
+| `UNFURL_RATE_PER_MIN` | `20` | Unfurl API rate limit per IP |
+| `CHAT_MSG_RATE_PER_MIN` | `10` | Spec: 10 messages / min |
+| `CHAT_EDIT_WINDOW_S` | `172800` | Telegram-like edit window (seconds from send; `0` = unlimited) |
+| `CHAT_EDIT_RATE_PER_MIN` | `20` | PATCH edits / IP |
 
 Never commit `.env` or keys. GPL TTS (`edge-tts`, piper / espeak-ng) is listed in `requirements-optional.txt` and stays **disabled**.
 
@@ -74,6 +79,7 @@ Never commit `.env` or keys. GPL TTS (`edge-tts`, piper / espeak-ng) is listed i
 4. Say «переведи на немецкий» to switch target locally (no API).
 5. If the other person speaks the target language, speech is translated back.
 6. Open `/chat` for кружочки: short tap on the record button toggles voice ↔ round video; hold to record; release to send; slide left to cancel; slide up to lock.
+7. The **Чат** pane on `/` accepts a URL; Talking unfurls a preview card. Tap the card for the sandboxed mini-browser (or «Открыть снаружи»). Long-press / ⋮ / ↑ on your own text to **Изменить**; the bubble shows **изменено**.
 
 ## Hosting outline (expand later)
 
@@ -102,6 +108,8 @@ Contract: `docs/commercial/openapi-commercial-v1.yaml`. This run does not create
 - `NOTICE.md` — licence caveats, **not legal advice**
 - `docs/GOOGLE_SCOPES.md` — Google OAuth checklist
 - `docs/SECURITY_AUDIT.md` — seven layers (skeleton)
+- `docs/CHAT_EDITING.md` — Telegram-like edits + merge notes for the notes PR
+- `docs/CHAT_NOTES.md` — voice notes / кружочки
 
 ## Licence
 
