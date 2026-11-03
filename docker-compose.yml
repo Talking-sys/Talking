@@ -8,6 +8,7 @@ services:
         required: false
     environment:
       APP_ENV: development
+      AUTH_MODE: local
       APP_HOST: 0.0.0.0
       APP_PORT: 8000
       WHISPER_MODEL: ${WHISPER_MODEL:-base}

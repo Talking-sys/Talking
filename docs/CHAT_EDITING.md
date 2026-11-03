@@ -12,7 +12,7 @@ fields.
 
 | Rule | Telegram | Talking |
 |---|---|---|
-| Who | Author only | Author only (`sender_id`). 403 otherwise. Auth is still M10 — the body `sender_id` is trusted like POST. |
+| Who | Author only | Author only (`sender_id`). 403 otherwise. M10 binds this to `current_user`; body `sender_id` is ignored (mismatch → 403). |
 | What | Text + captions | Text only. Caption kinds are reserved in `CAPTION_KINDS` but rejected with 422 until a caption UI exists. |
 | Length | 4096 (app) | 500 chars (`MAX_TEXT`), same as send. |
 | Window | ~48 h from original send | `CHAT_EDIT_WINDOW_S` (default **172800**). `0` = unlimited. Expired → **409**. |

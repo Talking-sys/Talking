@@ -10,7 +10,8 @@ import logging
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 
-from talking.security import unsign
+from talking.auth import authenticate_websocket
+from talking.ids import check_id
 
 from .hub import ChatHub
 
@@ -39,29 +40,21 @@ def register_chat_ws(app: FastAPI) -> None:
     if _ws_chat_registered(app):
         return
     hub = ensure_hub(app)
-    secret = app.state.secret
 
     @app.websocket("/ws/chat")
     async def ws_chat(ws: WebSocket, t: str = ""):
-        s = app.state.settings
-        origins = [o.strip() for o in s.cors_origins.split(",") if o.strip()]
-        origin = ws.headers.get("origin")
-        host = ws.headers.get("host", "")
-        allowed = set(origins) | {f"https://{host}", f"http://{host}"}
-        if origin and origin not in allowed:
-            await ws.close(code=1008, reason="origin")
-            return
-        uid = "local"
-        try:
-            uid = app.state.engine.store.get("user_id") or "local"
-        except Exception:
-            uid = "local"
-        tok = unsign(secret, t, "ws") if t else {"u": uid}
-        if t and not tok:
+        ctx = await authenticate_websocket(ws, t)
+        if ctx is None or not ctx.authenticated:
             await ws.close(code=1008, reason="handshake")
             return
-        uid = (tok or {}).get("u") or uid or "local"
+        uid = ctx.id
+        try:
+            uid = check_id(uid)
+        except ValueError:
+            await ws.close(code=1008, reason="handshake")
+            return
         await ws.accept()
+        app.state.auth_sockets.add(ws, uid, ctx.session_id)
         q: asyncio.Queue = asyncio.Queue(maxsize=200)
         hub.subscribe(uid, q)
         hub.subscribe("*", q)
@@ -90,6 +83,7 @@ def register_chat_ws(app: FastAPI) -> None:
         except WebSocketDisconnect:
             pass
         finally:
+            app.state.auth_sockets.discard(ws)
             hub.unsubscribe(uid, q)
             hub.unsubscribe("*", q)
             send_task.cancel()

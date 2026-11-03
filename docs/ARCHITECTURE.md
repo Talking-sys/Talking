@@ -81,6 +81,7 @@ talking/                 GPL open core package
   stt.py / translate.py / tts.py / vad.py
   buffer.py / offline_queue.py / archive.py
   commands.py / languages.py
+  auth/                  sessions, cookies, anonymous + phone (M10 stages 0–1)
   commercial/            HTTP client + stubs (no proprietary code)
   chat/                  unified store (notes + text + edits + on-demand premium STT); M4 extends this
   voice_translate/       press-and-hold live WS + record HTTP (reuses STT/translator)
@@ -100,6 +101,6 @@ docs/specs/              owner spec, human contribution evidence
 | 3-minute live buffer | SQLite + WAV on disk | same |
 | Offline queue | JSONL ring, delete after ACK | same |
 | History > 3 min | local JSONL; S3 if `S3_*` set | Cloudflare R2 |
-| Accounts / chat | file-backed dialogs + notes (`data/chat/`) | Postgres (Neon / Aurora) in M4 |
+| Accounts / chat | file-backed dialogs + notes (`data/chat/`); auth tables via Alembic when `AUTH_MODE=accounts` | Postgres (Neon / Aurora) in M4 for chat; auth is M10 (`docs/AUTH.md`) |
 | Rate limits / pubsub | in-process | Redis |
 | Link-preview cache | in-process; Redis if `REDIS_URL` | same |

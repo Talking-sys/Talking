@@ -382,6 +382,7 @@
     try {
       const data = await fetch("/api/chat/messages").then((r) => r.json());
       if (typeof data.edit_window_s === "number") editWindowS = data.edit_window_s;
+      if (data.user_id) currentUser = data.user_id;
       (data.messages || []).forEach((m) => renderMessage(m));
     } catch (_) { /* ignore */ }
   }

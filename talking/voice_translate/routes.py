@@ -16,12 +16,14 @@ import uuid
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, JSONResponse
 
+from talking.auth import authenticate_websocket
+from talking.auth.deps import require_user
 from talking.chat.media import MediaError, parse_waveform, sniff_container, validate_duration_ms
 from talking.chat.models import Message
 from talking.chat.notes import decode_pcm16k
 from talking.ids import check_id
 from talking.languages import WHISPER_LANGUAGES
-from talking.security import TokenBucket, client_ip, unsign
+from talking.security import TokenBucket, client_ip
 from talking.stt import STTUnavailable
 from talking.vad import pcm16_to_float
 
@@ -32,16 +34,8 @@ from .session import LiveTranslateSession
 log = logging.getLogger(__name__)
 
 
-def _uid_from_app(app: FastAPI) -> str:
-    uid = app.state.engine.store.get("user_id") or "local"
-    try:
-        return check_id(uid)
-    except ValueError:
-        return "local"
-
-
 def _user_id(request: Request) -> str:
-    return _uid_from_app(request.app)
+    return require_user(request).id
 
 
 def _public_message(app: FastAPI, user_id: str, msg: Message) -> dict:
@@ -226,26 +220,20 @@ def register_voice_translate(app: FastAPI) -> None:
     @app.websocket("/ws/translate/live")
     async def ws_live(ws: WebSocket, t: str = ""):
         eng = app.state.engine
-        origins = [o.strip() for o in s.cors_origins.split(",") if o.strip()]
         ip = client_ip(ws)
         if not live_limiter.allow(ip):
             await ws.close(code=1008, reason="rate limit")
             return
-        origin = ws.headers.get("origin")
-        host = ws.headers.get("host", "")
-        allowed = set(origins) | {f"https://{host}", f"http://{host}"}
-        if origin and origin not in allowed:
-            await ws.close(code=1008, reason="origin")
-            return
-        tok = unsign(app.state.secret, t, "ws") if t else {"u": _uid_from_app(app)}
-        if t and not tok:
+        ctx = await authenticate_websocket(ws, t)
+        if ctx is None or not ctx.authenticated:
             await ws.close(code=1008, reason="handshake")
             return
-        uid = (tok or {}).get("u") or _uid_from_app(app)
+        uid = ctx.id
         try:
             uid = check_id(uid)
         except ValueError:
-            uid = "local"
+            await ws.close(code=1008, reason="handshake")
+            return
         entitlement = live_translate_allowed(eng, uid)
         if not entitlement["allowed"]:
             await ws.accept()
@@ -258,6 +246,7 @@ def register_voice_translate(app: FastAPI) -> None:
             await ws.close(code=1008, reason="not entitled")
             return
         await ws.accept()
+        app.state.auth_sockets.add(ws, uid, ctx.session_id)
         loop = asyncio.get_running_loop()
         maxsize = max(8, int(s.voice_translate_max_queue))
         out: asyncio.Queue = asyncio.Queue(maxsize=maxsize)
@@ -331,5 +320,6 @@ def register_voice_translate(app: FastAPI) -> None:
         except WebSocketDisconnect:
             pass
         finally:
+            app.state.auth_sockets.discard(ws)
             sess.close()
             send_task.cancel()
