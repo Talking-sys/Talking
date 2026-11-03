@@ -9,6 +9,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import shutil
 import threading
 import time
 import uuid
@@ -221,7 +222,8 @@ class MediaLibrary:
     def max_for(self, kind: str) -> int:
         return self.video_max if kind == "video_note" else self.voice_max
 
-    def put(self, user_id: str, kind: str, data: bytes, filename: str | None = None) -> StoredMedia:
+    def put(self, user_id: str, kind: str, data: bytes, filename: str | None = None,
+            *, quota_bytes: int | None = None) -> StoredMedia:
         kind = validate_kind(kind)
         validate_filename(filename)
         if not data:
@@ -240,7 +242,8 @@ class MediaLibrary:
         with self._lock:
             idx = self._load_index(user_id)
             used = int(idx.get("used_bytes") or 0)
-            if used + len(data) > self.quota_bytes:
+            cap = self.quota_bytes if quota_bytes is None else quota_bytes
+            if used + len(data) > cap:
                 raise MediaError("per-user storage quota exceeded", status=413)
             dest.write_bytes(data)
             rec = {
@@ -301,6 +304,40 @@ class MediaLibrary:
                 path.unlink(missing_ok=True)
             except OSError:
                 pass
+
+    def delete_user(self, user_id: str) -> None:
+        try:
+            uid = check_id(user_id, "user_id")
+        except ValueError:
+            return
+        root = self.root / uid / "media"
+        if root.is_dir():
+            shutil.rmtree(root, ignore_errors=True)
+
+    def relocate_user(self, src_id: str, dest_id: str) -> dict[str, str]:
+        """Copy blobs src → dest. Return {old_media_id: new_media_id}."""
+        mapping: dict[str, str] = {}
+        try:
+            src = check_id(src_id, "user_id")
+            dest = check_id(dest_id, "user_id")
+        except ValueError:
+            return mapping
+        if src == dest:
+            return mapping
+        idx = self._load_index(src)
+        for mid, rec in (idx.get("files") or {}).items():
+            path = self._user_dir(src) / rec["path"]
+            if not path.is_file():
+                continue
+            try:
+                stored = self.put(
+                    dest, rec["kind"], path.read_bytes(), filename=rec.get("path"),
+                    quota_bytes=10**18,
+                )
+            except MediaError:
+                continue
+            mapping[mid] = stored.id
+        return mapping
 
     def quota(self, user_id: str) -> dict[str, int]:
         idx = self._load_index(user_id)

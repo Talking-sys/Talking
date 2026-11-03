@@ -7,6 +7,7 @@ keep the same shapes.
 from __future__ import annotations
 
 import json
+import shutil
 import threading
 import time
 import uuid
@@ -200,6 +201,59 @@ class ChatStore:
             tmp.write_text("\n".join(out) + ("\n" if out else ""), encoding="utf-8")
             tmp.replace(p)
         return removed
+
+    def delete_user(self, user_id: str) -> None:
+        """Remove all dialogs, messages, and media for a user."""
+        try:
+            uid = check_id(user_id, "user_id")
+        except ValueError:
+            return
+        root = self.root / uid
+        if root.is_dir():
+            shutil.rmtree(root, ignore_errors=True)
+
+    def _read_jsonl(self, user_id: str, dialog_id: str) -> list[Message]:
+        try:
+            p = self._messages_path(user_id, dialog_id)
+        except ValueError:
+            return []
+        if not p.exists():
+            return []
+        rows: list[Message] = []
+        for line in p.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            try:
+                rows.append(Message.from_dict(json.loads(line)))
+            except (json.JSONDecodeError, TypeError, KeyError):
+                continue
+        return rows
+
+    def relocate_user(self, src_id: str, dest_id: str, *, media_id_map: dict[str, str] | None = None) -> int:
+        """Copy src dialogs/messages onto dest. Returns copied message count."""
+        try:
+            src = check_id(src_id, "user_id")
+            dest = check_id(dest_id, "user_id")
+        except ValueError:
+            return 0
+        if src == dest:
+            return 0
+        mapping = media_id_map or {}
+        copied = 0
+        for d in self._load_dialogs(src):
+            if d.id == DEFAULT_DIALOG_ID:
+                dest_dialog = self.ensure_default_dialog(dest)
+            else:
+                dest_dialog = self.create_dialog(dest, d.title)
+            for msg in self._read_jsonl(src, d.id):
+                msg.dialog_id = dest_dialog.id
+                if msg.sender_id == src:
+                    msg.sender_id = dest
+                if msg.media_id and msg.media_id in mapping:
+                    msg.media_id = mapping[msg.media_id]
+                self.add_message(dest, msg)
+                copied += 1
+        return copied
 
     def purge_older_than(self, user_id: str, max_age_s: float) -> list[Message]:
         """Drop messages past retention. Transcripts are on the rows, so they expire too."""

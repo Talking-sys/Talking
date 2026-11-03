@@ -11,6 +11,7 @@ from starlette.responses import JSONResponse, Response
 from talking.ids import check_id
 from talking.security import client_ip, unsign
 
+from .capabilities import identities_are_anonymous
 from .crypto import ACCESS_COOKIE, ACCESS_COOKIE_DEV, CSRF_HEADER, REFRESH_COOKIE, REFRESH_COOKIE_DEV
 
 log = logging.getLogger("talking.auth")
@@ -106,7 +107,7 @@ async def resolve_user(request: Request) -> UserContext:
         return UserContext(id="", authenticated=False, auth_mode="accounts")
     user, sess = loaded
     methods = await svc.store.list_identities(user.id)
-    anon = all(m.provider == "anonymous" for m in methods) if methods else True
+    anon = identities_are_anonymous(methods)
     return UserContext(
         id=user.id, authenticated=True, auth_mode="accounts", status=user.status,
         session_id=sess.id, session=sess, user=user, is_anonymous=anon,
@@ -138,9 +139,10 @@ async def authenticate_websocket(ws: WebSocket, t: str = "") -> UserContext | No
             loaded = await app.state.auth.load_access(payload)
             if loaded is not None:
                 user, sess = loaded
+                methods = await app.state.auth.store.list_identities(user.id)
                 return UserContext(
                     id=user.id, authenticated=True, auth_mode=mode, session_id=sess.id,
-                    session=sess, user=user, is_anonymous=False,
+                    session=sess, user=user, is_anonymous=identities_are_anonymous(methods),
                 )
             return None
 
@@ -157,9 +159,10 @@ async def authenticate_websocket(ws: WebSocket, t: str = "") -> UserContext | No
             if loaded is None:
                 return None
             user, sess = loaded
+            methods = await app.state.auth.store.list_identities(user.id)
             return UserContext(
                 id=user.id, authenticated=True, auth_mode="accounts", session_id=sess.id,
-                session=sess, user=user,
+                session=sess, user=user, is_anonymous=identities_are_anonymous(methods),
             )
         try:
             uid = check_id(uid) if uid else local_user_id(app)

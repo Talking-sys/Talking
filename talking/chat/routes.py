@@ -25,6 +25,7 @@ from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile, Web
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 
 from talking.auth import authenticate_websocket
+from talking.auth.capabilities import deny_anonymous_capability, effective_limits, policy_of
 from talking.auth.deps import require_user
 from talking.commercial.client import ENTITLEMENT_VOICE_TRANSCRIPTION
 from talking.ids import check_id
@@ -55,7 +56,8 @@ def _http(err: MediaError | ValueError | KeyError) -> HTTPException:
     return HTTPException(400, str(err))
 
 
-def _user_id(request: Request) -> str:
+def _user_id(request: Request, capability: str = "chat") -> str:
+    deny_anonymous_capability(request, capability)
     return require_user(request).id
 
 
@@ -97,17 +99,35 @@ def register_chat(app: FastAPI) -> None:
     app.state.chat_hub = ensure_hub(app)
     app.state.chat_msg_limiter = TokenBucket(s.chat_msg_per_min, burst=s.chat_msg_per_min)
     app.state.chat_upload_limiter = TokenBucket(s.chat_upload_per_min, burst=s.chat_upload_per_min)
+    app.state.anon_chat_msg_limiter = TokenBucket(
+        max(1, s.anon_chat_msg_per_min or s.chat_msg_per_min),
+        burst=max(1, s.anon_chat_msg_per_min or s.chat_msg_per_min),
+    )
+    app.state.anon_chat_upload_limiter = TokenBucket(
+        max(1, s.anon_chat_upload_per_min or s.chat_upload_per_min),
+        burst=max(1, s.anon_chat_upload_per_min or s.chat_upload_per_min),
+    )
     app.state.chat_transcribe_limiter = TokenBucket(
         s.chat_transcribe_per_min, burst=s.chat_transcribe_per_min,
     )
 
-    def _limit_msg(uid: str) -> None:
-        if not app.state.chat_msg_limiter.allow(uid):
-            raise HTTPException(429, "rate limit: 10 messages per minute")
+    def _anon(request: Request) -> bool:
+        return policy_of(request).applies_to(getattr(request.state, "user", None))
 
-    def _limit_upload(uid: str, ip: str) -> None:
-        if not app.state.chat_upload_limiter.allow(uid) or not app.state.chat_upload_limiter.allow("ip:" + ip):
+    def _limit_msg(request: Request, uid: str) -> None:
+        limits = effective_limits(request)
+        cap = int(limits.get("chat_msg_per_min") or s.chat_msg_per_min)
+        limiter = app.state.anon_chat_msg_limiter if _anon(request) else app.state.chat_msg_limiter
+        if not limiter.allow(uid):
+            raise HTTPException(429, f"rate limit: {cap} messages per minute")
+
+    def _limit_upload(request: Request, uid: str, ip: str) -> None:
+        limiter = app.state.anon_chat_upload_limiter if _anon(request) else app.state.chat_upload_limiter
+        if not limiter.allow(uid) or not limiter.allow("ip:" + ip):
             raise HTTPException(429, "rate limit: too many uploads")
+
+    def _quota_bytes(request: Request) -> int:
+        return int(effective_limits(request).get("chat_quota_bytes") or s.chat_quota_bytes)
 
     def _public_for(uid: str, msg: Message) -> dict:
         return _public_message(app, uid, msg)
@@ -175,6 +195,8 @@ def register_chat(app: FastAPI) -> None:
     def chat_status(request: Request):
         uid = _user_id(request)
         q = app.state.chat_media.quota(uid)
+        limits = effective_limits(request)
+        q = {**q, "quota_bytes": int(limits.get("chat_quota_bytes") or q.get("quota_bytes") or 0)}
         return {
             "ok": True,
             "module": "chat",
@@ -190,11 +212,12 @@ def register_chat(app: FastAPI) -> None:
                 "note_max_ms": s.chat_note_max_ms,
                 "voice_max_bytes": s.chat_voice_max_bytes,
                 "video_max_bytes": s.chat_video_max_bytes,
-                "quota_bytes": s.chat_quota_bytes,
-                "messages_per_min": s.chat_msg_per_min,
+                "quota_bytes": int(limits.get("chat_quota_bytes") or s.chat_quota_bytes),
+                "messages_per_min": int(limits.get("chat_msg_per_min") or s.chat_msg_per_min),
             },
             "quota": q,
             "transcription": _transcription_public(uid),
+            "anonymous": policy_of(request).applies_to(getattr(request.state, "user", None)),
         }
 
     @app.get("/api/chat/dialogs")
@@ -205,7 +228,7 @@ def register_chat(app: FastAPI) -> None:
     @app.post("/api/chat/dialogs")
     async def create_dialog(request: Request):
         uid = _user_id(request)
-        _limit_msg(uid)
+        _limit_msg(request, uid)
         data = await request.json() if request.headers.get("content-type", "").startswith("application/json") else {}
         title = str((data or {}).get("title") or "Чат")
         return app.state.chat_store.create_dialog(uid, title).to_public()
@@ -226,12 +249,14 @@ def register_chat(app: FastAPI) -> None:
         file: UploadFile = File(...),
         kind: str = Form(...),
     ):
-        uid = _user_id(request)
-        _limit_upload(uid, client_ip(request))
+        uid = _user_id(request, "chat_notes")
+        _limit_upload(request, uid, client_ip(request))
         try:
             kind = validate_kind(kind)
             blob = await _read_limited(file, app.state.chat_media.max_for(kind))
-            stored = app.state.chat_media.put(uid, kind, blob, filename=file.filename)
+            stored = app.state.chat_media.put(
+                uid, kind, blob, filename=file.filename, quota_bytes=_quota_bytes(request),
+            )
         except MediaError as e:
             raise _http(e)
         return stored.to_public()
@@ -316,9 +341,9 @@ def register_chat(app: FastAPI) -> None:
         waveform: str = Form(""),
         target_lang: str = Form(""),
     ):
-        uid = _user_id(request)
-        _limit_msg(uid)
-        _limit_upload(uid, client_ip(request))
+        uid = _user_id(request, "chat_notes")
+        _limit_msg(request, uid)
+        _limit_upload(request, uid, client_ip(request))
         try:
             app.state.chat_store.get_dialog(uid, dialog_id)
             kind = validate_kind(kind)
@@ -328,7 +353,9 @@ def register_chat(app: FastAPI) -> None:
             if tgt and tgt not in WHISPER_LANGUAGES:
                 raise HTTPException(400, "unknown target_lang")
             blob = await _read_limited(file, app.state.chat_media.max_for(kind))
-            stored = app.state.chat_media.put(uid, kind, blob, filename=file.filename)
+            stored = app.state.chat_media.put(
+                uid, kind, blob, filename=file.filename, quota_bytes=_quota_bytes(request),
+            )
             msg = _make_note_message(uid, dialog_id, stored, dur, peaks, blob, tgt)
         except HTTPException:
             raise
@@ -341,7 +368,7 @@ def register_chat(app: FastAPI) -> None:
     @app.post("/api/chat/dialogs/{dialog_id}/messages")
     async def post_message(request: Request, dialog_id: str):
         uid = _user_id(request)
-        _limit_msg(uid)
+        _limit_msg(request, uid)
         try:
             data = await request.json()
         except json.JSONDecodeError:
@@ -410,7 +437,7 @@ def register_chat(app: FastAPI) -> None:
 
     @app.post("/api/chat/messages/{message_id}/transcribe")
     async def transcribe_message(request: Request, message_id: str):
-        uid = _user_id(request)
+        uid = _user_id(request, "transcription")
         _purge_retention(uid)
         if not s.chat_transcribe:
             raise HTTPException(503, "transcription disabled")
@@ -481,6 +508,11 @@ def register_chat(app: FastAPI) -> None:
         if ctx is None or not ctx.authenticated:
             await ws.close(code=1008, reason="handshake")
             return
+        if ctx.auth_mode == "accounts" and ctx.is_anonymous:
+            limiter = getattr(app.state, "anon_ws_limiter", None)
+            if limiter is not None and not limiter.allow(client_ip(ws)):
+                await ws.close(code=1008, reason="rate limit")
+                return
         uid = ctx.id
         try:
             uid = check_id(uid)

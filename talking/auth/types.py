@@ -20,6 +20,7 @@ class UserRecord:
     profile_private: bool = True
     created_at: datetime = field(default_factory=_now)
     updated_at: datetime = field(default_factory=_now)
+    last_seen_at: datetime = field(default_factory=_now)
 
 
 @dataclass
@@ -67,6 +68,17 @@ class RecoveryRecord:
     code_hash: str
     created_at: datetime = field(default_factory=_now)
     used_at: datetime | None = None
+
+
+@dataclass
+class IdentityClaim:
+    """Verified sign-in method ready to attach. Phone is implemented; others plug in."""
+    provider: str
+    subject: str
+    email_hash: str | None = None
+    email_enc: str | None = None
+    email_verified: bool = False
+    phone_enc: str | None = None
 
 
 @dataclass

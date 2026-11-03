@@ -15,6 +15,8 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 ACCESS_TTL_S = 15 * 60
 REFRESH_TTL_S = 30 * 24 * 3600
 RECOVERY_TTL_S = 0  # recovery codes do not expire; they are single-use
+LAST_SEEN_WRITE_S = 60  # throttle user.last_seen_at persistence
+MERGE_PURPOSE = "merge"
 PHONE_OTP_TTL_S = 10 * 60
 WS_TOKEN_TTL_S = 60
 WS_TOKEN_TTL_LOCAL_S = 3600

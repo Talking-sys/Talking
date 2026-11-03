@@ -5,6 +5,7 @@ import time
 
 from fastapi import FastAPI, HTTPException, Request
 
+from talking.auth.capabilities import deny_anonymous_capability
 from talking.auth.deps import require_user
 
 from ..security import TokenBucket, client_ip
@@ -63,6 +64,7 @@ def register_message_routes(
 
     @app.get("/api/chat/messages")
     def list_messages(request: Request, conversation_id: str = DEFAULT_CONVERSATION, limit: int = 50):
+        deny_anonymous_capability(request, "chat")
         uid = require_user(request).id
         conv = conversation_id or DEFAULT_CONVERSATION
         if not _can_access(store, uid, conv):
@@ -78,6 +80,7 @@ def register_message_routes(
 
     @app.post("/api/chat/messages")
     async def post_message(request: Request):
+        deny_anonymous_capability(request, "chat")
         if not limiter.allow(client_ip(request)):
             raise HTTPException(429, "rate limit")
         uid = require_user(request).id
@@ -116,6 +119,7 @@ def register_message_routes(
 
     @app.patch("/api/chat/messages/{message_id}")
     async def patch_message(message_id: str, request: Request):
+        deny_anonymous_capability(request, "chat")
         if not edit_limiter.allow(client_ip(request)):
             raise HTTPException(429, "rate limit")
         uid = require_user(request).id

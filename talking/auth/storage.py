@@ -20,6 +20,9 @@ from .types import (
 class AuthStorage(Protocol):
     async def create_user(self, user: UserRecord) -> UserRecord: ...
     async def get_user(self, user_id: str) -> UserRecord | None: ...
+    async def save_user(self, user: UserRecord) -> UserRecord: ...
+    async def list_stale_anonymous(self, cutoff, *, limit: int = 50) -> list[UserRecord]: ...
+    async def purge_user_auth(self, user_id: str, *, now=None) -> None: ...
     async def create_identity(self, ident: IdentityRecord) -> IdentityRecord: ...
     async def get_identity(self, provider: str, subject: str) -> IdentityRecord | None: ...
     async def get_identity_by_id(self, ident_id: str) -> IdentityRecord | None: ...
@@ -35,6 +38,8 @@ class AuthStorage(Protocol):
     async def create_recovery(self, rec: RecoveryRecord) -> RecoveryRecord: ...
     async def get_recovery_by_hash(self, code_hash: str) -> RecoveryRecord | None: ...
     async def save_recovery(self, rec: RecoveryRecord) -> RecoveryRecord: ...
+    async def list_recovery_for_user(self, user_id: str) -> list[RecoveryRecord]: ...
+    async def invalidate_unused_recovery(self, user_id: str, *, now=None) -> int: ...
     async def log_event(self, ev: AuthEventRecord) -> None: ...
     async def create_challenge(self, ch: ChallengeRecord) -> ChallengeRecord: ...
     async def get_challenge(self, challenge_id: str) -> ChallengeRecord | None: ...
@@ -62,6 +67,43 @@ class MemoryAuthStorage:
 
     async def get_user(self, user_id: str) -> UserRecord | None:
         return self.users.get(user_id)
+
+    async def save_user(self, user: UserRecord) -> UserRecord:
+        with self._lock:
+            self.users[user.id] = user
+        return user
+
+    async def list_stale_anonymous(self, cutoff, *, limit: int = 50) -> list[UserRecord]:
+        out: list[UserRecord] = []
+        with self._lock:
+            for user in self.users.values():
+                if user.status != "active":
+                    continue
+                methods = [i for i in self.identities.values() if i.user_id == user.id]
+                if not methods or any(i.provider != "anonymous" for i in methods):
+                    continue
+                seen = user.last_seen_at or user.created_at
+                if seen >= cutoff:
+                    continue
+                out.append(user)
+                if len(out) >= limit:
+                    break
+        return out
+
+    async def purge_user_auth(self, user_id: str, *, now=None) -> None:
+        now = now or utcnow()
+        with self._lock:
+            user = self.users.get(user_id)
+            if user is not None:
+                user.status = "deleted"
+                user.nickname = None
+                user.updated_at = now
+            self.identities = {k: v for k, v in self.identities.items() if v.user_id != user_id}
+            self.recovery = {k: v for k, v in self.recovery.items() if v.user_id != user_id}
+            self.challenges = {k: v for k, v in self.challenges.items() if v.user_id != user_id}
+            for sess in self.sessions.values():
+                if sess.user_id == user_id and sess.revoked_at is None:
+                    sess.revoked_at = now
 
     async def create_identity(self, ident: IdentityRecord) -> IdentityRecord:
         with self._lock:
@@ -148,6 +190,19 @@ class MemoryAuthStorage:
             self.recovery[rec.id] = rec
         return rec
 
+    async def list_recovery_for_user(self, user_id: str) -> list[RecoveryRecord]:
+        return [r for r in self.recovery.values() if r.user_id == user_id]
+
+    async def invalidate_unused_recovery(self, user_id: str, *, now=None) -> int:
+        now = now or utcnow()
+        n = 0
+        with self._lock:
+            for rec in self.recovery.values():
+                if rec.user_id == user_id and rec.used_at is None:
+                    rec.used_at = now
+                    n += 1
+        return n
+
     async def log_event(self, ev: AuthEventRecord) -> None:
         with self._lock:
             self.events.append(ev)
@@ -196,7 +251,7 @@ class PostgresAuthStorage:
                 id=_uuid(user.id), status=user.status, nickname=user.nickname,
                 native_lang=user.native_lang, ui_lang=user.ui_lang,
                 profile_private=user.profile_private, created_at=user.created_at,
-                updated_at=user.updated_at,
+                updated_at=user.updated_at, last_seen_at=user.last_seen_at,
             )
             db.add(row)
             await db.commit()
@@ -207,6 +262,65 @@ class PostgresAuthStorage:
         async with self._sf() as db:
             row = await db.get(User, _uuid(user_id))
             return _user_rec(row) if row else None
+
+    async def save_user(self, user: UserRecord) -> UserRecord:
+        from .models import User
+        async with self._sf() as db:
+            row = await db.get(User, _uuid(user.id))
+            if row is None:
+                return user
+            row.status = user.status
+            row.nickname = user.nickname
+            row.native_lang = user.native_lang
+            row.ui_lang = user.ui_lang
+            row.profile_private = user.profile_private
+            row.updated_at = user.updated_at
+            row.last_seen_at = user.last_seen_at
+            await db.commit()
+        return user
+
+    async def list_stale_anonymous(self, cutoff, *, limit: int = 50) -> list[UserRecord]:
+        from sqlalchemy import exists, select
+        from .models import Identity, User
+        async with self._sf() as db:
+            has_anon = exists().where(
+                Identity.user_id == User.id, Identity.provider == "anonymous",
+            )
+            has_verified = exists().where(
+                Identity.user_id == User.id, Identity.provider != "anonymous",
+            )
+            q = await db.execute(
+                select(User)
+                .where(
+                    User.status == "active",
+                    User.last_seen_at < cutoff,
+                    has_anon,
+                    ~has_verified,
+                )
+                .limit(limit)
+            )
+            return [_user_rec(r) for r in q.scalars().all()]
+
+    async def purge_user_auth(self, user_id: str, *, now=None) -> None:
+        from sqlalchemy import delete, update
+        from .models import Identity, LoginChallenge, RecoveryCode, Session, User
+        now = now or utcnow()
+        uid = _uuid(user_id)
+        async with self._sf() as db:
+            await db.execute(delete(Identity).where(Identity.user_id == uid))
+            await db.execute(delete(RecoveryCode).where(RecoveryCode.user_id == uid))
+            await db.execute(delete(LoginChallenge).where(LoginChallenge.user_id == uid))
+            await db.execute(
+                update(Session)
+                .where(Session.user_id == uid, Session.revoked_at.is_(None))
+                .values(revoked_at=now)
+            )
+            row = await db.get(User, uid)
+            if row is not None:
+                row.status = "deleted"
+                row.nickname = None
+                row.updated_at = now
+            await db.commit()
 
     async def create_identity(self, ident: IdentityRecord) -> IdentityRecord:
         from .models import Identity
@@ -362,6 +476,32 @@ class PostgresAuthStorage:
                 await db.commit()
         return rec
 
+    async def list_recovery_for_user(self, user_id: str) -> list[RecoveryRecord]:
+        from sqlalchemy import select
+        from .models import RecoveryCode
+        async with self._sf() as db:
+            q = await db.execute(select(RecoveryCode).where(RecoveryCode.user_id == _uuid(user_id)))
+            return [
+                RecoveryRecord(
+                    id=str(row.id), user_id=str(row.user_id), code_hash=row.code_hash,
+                    created_at=_dt(row.created_at), used_at=_dt(row.used_at) if row.used_at else None,
+                )
+                for row in q.scalars().all()
+            ]
+
+    async def invalidate_unused_recovery(self, user_id: str, *, now=None) -> int:
+        from sqlalchemy import update
+        from .models import RecoveryCode
+        now = now or utcnow()
+        async with self._sf() as db:
+            res = await db.execute(
+                update(RecoveryCode)
+                .where(RecoveryCode.user_id == _uuid(user_id), RecoveryCode.used_at.is_(None))
+                .values(used_at=now)
+            )
+            await db.commit()
+            return res.rowcount or 0
+
     async def log_event(self, ev: AuthEventRecord) -> None:
         from .models import AuthEvent
         async with self._sf() as db:
@@ -417,10 +557,12 @@ class PostgresAuthStorage:
 
 
 def _user_rec(row) -> UserRecord:
+    last_seen = getattr(row, "last_seen_at", None) or row.created_at
     return UserRecord(
         id=str(row.id), status=row.status, nickname=row.nickname, native_lang=row.native_lang,
         ui_lang=row.ui_lang, profile_private=row.profile_private,
         created_at=_dt(row.created_at), updated_at=_dt(row.updated_at),
+        last_seen_at=_dt(last_seen),
     )
 
 

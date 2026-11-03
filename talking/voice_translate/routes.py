@@ -17,6 +17,7 @@ from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile, Web
 from fastapi.responses import HTMLResponse, JSONResponse
 
 from talking.auth import authenticate_websocket
+from talking.auth.capabilities import deny_anonymous_capability, effective_limits, policy_of
 from talking.auth.deps import require_user
 from talking.chat.media import MediaError, parse_waveform, sniff_container, validate_duration_ms
 from talking.chat.models import Message
@@ -35,6 +36,7 @@ log = logging.getLogger(__name__)
 
 
 def _user_id(request: Request) -> str:
+    deny_anonymous_capability(request, "voice_translate")
     return require_user(request).id
 
 
@@ -63,7 +65,7 @@ async def _read_limited(upload: UploadFile, limit: int) -> bytes:
 
 
 def _attach_voice_note(app: FastAPI, uid: str, dialog_id: str, blob: bytes,
-                       duration_ms: int, waveform, result) -> dict:
+                       duration_ms: int, waveform, result, *, quota_bytes: int | None = None) -> dict:
     store = getattr(app.state, "chat_store", None)
     media = getattr(app.state, "chat_media", None)
     hub = getattr(app.state, "chat_hub", None)
@@ -74,7 +76,7 @@ def _attach_voice_note(app: FastAPI, uid: str, dialog_id: str, blob: bytes,
     except (ValueError, KeyError) as e:
         raise HTTPException(404, str(e) or "dialog not found")
     try:
-        stored = media.put(uid, "voice_note", blob, filename="translate.wav")
+        stored = media.put(uid, "voice_note", blob, filename="translate.wav", quota_bytes=quota_bytes)
     except MediaError as e:
         raise HTTPException(e.status, str(e))
     msg = Message(
@@ -107,8 +109,13 @@ def register_voice_translate(app: FastAPI) -> None:
     s = app.state.settings
     record_limiter = TokenBucket(s.voice_translate_record_per_min, burst=s.voice_translate_record_per_min)
     live_limiter = TokenBucket(s.voice_translate_live_connects_per_min)
+    anon_record_limiter = TokenBucket(
+        max(1, s.anon_voice_translate_record_per_min or s.voice_translate_record_per_min),
+        burst=max(1, s.anon_voice_translate_record_per_min or s.voice_translate_record_per_min),
+    )
     app.state.voice_translate_record_limiter = record_limiter
     app.state.voice_translate_live_limiter = live_limiter
+    app.state.anon_voice_translate_record_limiter = anon_record_limiter
 
     def _session_factory(engine, emit, user_id: str) -> LiveTranslateSession:
         factory = getattr(app.state, "live_session_factory", None)
@@ -160,7 +167,12 @@ def register_voice_translate(app: FastAPI) -> None:
         waveform: str = Form(""),
     ):
         uid = _user_id(request)
-        if not record_limiter.allow(uid) or not record_limiter.allow("ip:" + client_ip(request)):
+        limiter = (
+            anon_record_limiter
+            if policy_of(request).applies_to(getattr(request.state, "user", None))
+            else record_limiter
+        )
+        if not limiter.allow(uid) or not limiter.allow("ip:" + client_ip(request)):
             raise HTTPException(429, "rate limit: too many record translations")
         src = normalize_lang(source_lang, allow_auto=True) or "auto"
         tgt = normalize_lang(target_lang)
@@ -199,7 +211,10 @@ def register_voice_translate(app: FastAPI) -> None:
         audio_retained = False
         did = (dialog_id or "").strip()
         if did:
-            message = _attach_voice_note(app, uid, did, blob, dur, peaks, result)
+            quota = int(effective_limits(request).get("chat_quota_bytes") or s.chat_quota_bytes)
+            message = _attach_voice_note(
+                app, uid, did, blob, dur, peaks, result, quota_bytes=quota,
+            )
             audio_retained = True
         want_tts = str(tts).strip().lower() in ("1", "true", "yes", "on")
         body = {
@@ -228,6 +243,15 @@ def register_voice_translate(app: FastAPI) -> None:
         if ctx is None or not ctx.authenticated:
             await ws.close(code=1008, reason="handshake")
             return
+        if ctx.auth_mode == "accounts" and ctx.is_anonymous:
+            policy = getattr(ws.app.state, "anon_policy", None)
+            if policy is not None and not policy.allows("voice_translate"):
+                await ws.close(code=1008, reason="capability_denied")
+                return
+            ws_lim = getattr(ws.app.state, "anon_ws_limiter", None)
+            if ws_lim is not None and not ws_lim.allow(ip):
+                await ws.close(code=1008, reason="rate limit")
+                return
         uid = ctx.id
         try:
             uid = check_id(uid)
