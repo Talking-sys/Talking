@@ -1,5 +1,7 @@
-"""Minimal /api/chat/messages routes (link-preview only). M4 will extend."""
+"""Minimal /api/chat/messages routes (link-preview + edits). M4 will extend."""
 from __future__ import annotations
+
+import time
 
 from fastapi import FastAPI, HTTPException, Request
 
@@ -7,7 +9,22 @@ from ..security import TokenBucket, client_ip
 from ..unfurl.service import UnfurlService
 from ..unfurl.ssrf import SSRFError
 from ..unfurl.urls import extract_urls
+from .edits import EditError, first_url_changed
+from .events import ChatHub, ensure_hub
 from .messages import DEFAULT_CONVERSATION, MAX_TEXT, MessageStore
+from .translation_cache import MessageTranslationCache
+
+
+def _refresh_preview(unfurl: UnfurlService, text: str, old_urls: list[str], old_preview: dict | None):
+    urls = extract_urls(text)
+    if not first_url_changed(old_urls, urls):
+        return urls, old_preview
+    if not urls:
+        return urls, None
+    try:
+        return urls, unfurl.preview(urls[0])
+    except SSRFError:
+        return urls, None
 
 
 def register_message_routes(
@@ -16,13 +33,27 @@ def register_message_routes(
     store: MessageStore,
     unfurl: UnfurlService,
     limiter: TokenBucket,
+    edit_limiter: TokenBucket | None = None,
+    hub: ChatHub | None = None,
+    translations: MessageTranslationCache | None = None,
 ) -> None:
+    hub = hub or ensure_hub(app)
+    translations = translations or getattr(app.state, "chat_translations", None) or MessageTranslationCache()
+    app.state.chat_translations = translations
+    edit_limiter = edit_limiter or TokenBucket(20)
+
+    def _window(request: Request) -> int:
+        s = getattr(request.app.state, "settings", None)
+        return int(getattr(s, "chat_edit_window_s", 48 * 3600) or 0)
+
     @app.get("/api/chat/messages")
-    def list_messages(conversation_id: str = DEFAULT_CONVERSATION, limit: int = 50):
+    def list_messages(request: Request, conversation_id: str = DEFAULT_CONVERSATION, limit: int = 50):
         return {
             "ok": True,
             "conversation_id": conversation_id or DEFAULT_CONVERSATION,
             "messages": [m.to_dict() for m in store.list(conversation_id, limit)],
+            "edit_window_s": _window(request),
+            "max_text": MAX_TEXT,
         }
 
     @app.post("/api/chat/messages")
@@ -57,3 +88,46 @@ def register_message_routes(
             preview=preview,
         )
         return {"ok": True, "message": msg.to_dict()}
+
+    @app.patch("/api/chat/messages/{message_id}")
+    async def patch_message(message_id: str, request: Request):
+        if not edit_limiter.allow(client_ip(request)):
+            raise HTTPException(429, "rate limit")
+        try:
+            data = await request.json()
+        except Exception:
+            raise HTTPException(400, "invalid JSON")
+        if not isinstance(data, dict):
+            raise HTTPException(400, "invalid JSON")
+        if "text" not in data:
+            raise HTTPException(422, "text required")
+        sender = str(data.get("sender_id") or "local")[:64]
+        conv = data.get("conversation_id")
+        conv_s = str(conv)[:64] if conv else None
+        old = store.get(message_id, conv_s)
+        if old is None:
+            raise HTTPException(404, "message not found")
+        old_text = old.text
+        old_urls = list(old.urls)
+        old_preview = old.preview
+        try:
+            msg, changed = store.edit_text(
+                message_id,
+                data.get("text"),
+                actor_id=sender,
+                now=time.time(),
+                window_s=_window(request),
+                max_text=MAX_TEXT,
+                conversation_id=conv_s,
+            )
+        except EditError as e:
+            raise HTTPException(e.status, e.message) from e
+        if changed:
+            translations.invalidate_message(msg.id, old_text=old_text)
+            urls, preview = _refresh_preview(unfurl, msg.text, old_urls, old_preview)
+            msg.urls = urls
+            msg.preview = preview
+            public = msg.to_dict()
+            hub.publish_edit(public)
+            return {"ok": True, "message": public, "changed": True}
+        return {"ok": True, "message": msg.to_dict(), "changed": False}

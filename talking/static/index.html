@@ -8,6 +8,7 @@
   <link rel="icon" href="/static/logo.svg" type="image/svg+xml">
   <link rel="stylesheet" href="/static/app.css">
   <link rel="stylesheet" href="/static/link-preview.css">
+  <link rel="stylesheet" href="/static/chat-edit.css">
 </head>
 <body>
   <header class="top">
@@ -61,11 +62,20 @@
       <h2>Чат <small>превью ссылок</small></h2>
       <p class="hint">Сообщение со ссылкой показывает карточку (заголовок, описание, картинка). Нажмите карточку — мини-браузер.</p>
       <div id="chatFeed" class="chat-feed" aria-live="polite"></div>
+      <div id="editBanner" class="edit-banner" hidden>
+        <span class="edit-banner-icon" aria-hidden="true">✎</span>
+        <div class="edit-banner-body">
+          <div class="edit-banner-title" id="editBannerTitle">Редактирование</div>
+          <div class="edit-banner-preview" id="editBannerPreview"></div>
+        </div>
+        <button type="button" id="editCancel" class="edit-cancel" aria-label="Отменить редактирование">×</button>
+      </div>
       <form id="chatForm" class="chat-form" autocomplete="off">
         <input id="chatInput" type="text" maxlength="500" placeholder="Напишите сообщение со ссылкой…" aria-label="Текст сообщения">
-        <button type="submit">Отправить</button>
+        <button type="submit" id="chatSend">Отправить</button>
       </form>
     </section>
+    <div id="chatMenu" class="chat-menu" hidden role="menu" aria-label="Действия с сообщением"></div>
   </main>
 
   <div id="miniBrowser" class="mini-browser" hidden>
@@ -84,6 +94,7 @@
   </footer>
   <script src="/static/vad.js"></script>
   <script src="/static/app.js"></script>
+  <script src="/static/chat-edit.js"></script>
   <script src="/static/link-preview.js"></script>
 </body>
 </html>

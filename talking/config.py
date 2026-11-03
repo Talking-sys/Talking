@@ -109,6 +109,9 @@ class Settings:
     unfurl_cache_ttl: int = field(default_factory=lambda: _env_int("UNFURL_CACHE_TTL_S", 86_400))
     unfurl_rate_per_min: int = field(default_factory=lambda: _env_int("UNFURL_RATE_PER_MIN", 20))
     chat_msg_rate_per_min: int = field(default_factory=lambda: _env_int("CHAT_MSG_RATE_PER_MIN", 10))
+    # Telegram ~48 h from original send. 0 = unlimited.
+    chat_edit_window_s: int = field(default_factory=lambda: _env_int("CHAT_EDIT_WINDOW_S", 48 * 3600))
+    chat_edit_rate_per_min: int = field(default_factory=lambda: _env_int("CHAT_EDIT_RATE_PER_MIN", 20))
 
     @property
     def production(self) -> bool:
