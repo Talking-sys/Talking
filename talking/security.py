@@ -100,13 +100,26 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
 
     async def dispatch(self, request: Request, call_next):
         response: Response = await call_next(request)
+        # frame-src allows the sandboxed mini-browser (http/https only; JS/data
+        # schemes are rejected in talking/static/link-preview.js before load).
+        # The app chrome must not be nested (frame-ancestors none). Fixture
+        # pages used as mini-browser targets allow same-origin framing only.
+        embeddable = request.url.path.startswith("/static/fixtures/")
+        # Sandboxed iframes get a unique origin, so frame-ancestors 'self' on the
+        # fixture would block our own mini-browser. Omit it here; XFO SAMEORIGIN
+        # still stops other sites from framing the file.
+        ancestors = "" if embeddable else " frame-ancestors 'none';"
         csp = "default-src 'self'; img-src 'self' data:; media-src 'self' blob:; " \
               "style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self' ws: wss:; " \
-              "frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
+              f"frame-src 'self' https: http:;{ancestors} " \
+              "base-uri 'self'; form-action 'self'"
         response.headers.setdefault("Content-Security-Policy", csp)
         response.headers.setdefault("X-Content-Type-Options", "nosniff")
         response.headers.setdefault("Referrer-Policy", "no-referrer")
-        response.headers.setdefault("X-Frame-Options", "DENY")
+        if embeddable:
+            response.headers.setdefault("X-Frame-Options", "SAMEORIGIN")
+        else:
+            response.headers.setdefault("X-Frame-Options", "DENY")
         response.headers.setdefault("Permissions-Policy", "microphone=(self), camera=(), geolocation=()")
         if self.production:
             response.headers.setdefault("Strict-Transport-Security", "max-age=15552000")
