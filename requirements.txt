@@ -25,3 +25,4 @@ cryptography>=42        # Apache-2.0 OR BSD-3-Clause
 boto3>=1.34             # Apache-2.0, S3-compatible archive
 redis>=5.0              # MIT
 asyncpg>=0.29           # Apache-2.0, optional Postgres/Neon ping and future schema
+Pillow>=10              # HPND, re-encode + strip EXIF on link-preview images
