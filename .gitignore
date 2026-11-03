@@ -1,5 +1,42 @@
-# Object file
-*.o
-
-# Ada Library Information
-*.ali
+.venv/
+venv/
+env/
+data/
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+dist/
+build/
+*.egg-info/
+.env
+.env.*
+!.env.example
+*.p8
+*.pem
+*.key
+*.crt
+!talking/static/logo.svg
+.DS_Store
+.idea/
+.vscode/
+*.onnx
+*.bin
+*.pt
+*.pth
+whisper-models/
+.cache/
+huggingface/
+*.sqlite
+*.sqlite-journal
+uploads/
+outbox.jsonl
+offline_queue.jsonl
+offline_meta.json
+# generated self-signed TLS
+certs/
