@@ -52,9 +52,15 @@ def test_migrations_up_down():
             names = {r["tablename"] for r in tables}
             for expected in (
                 "users", "identities", "sessions", "recovery_codes",
-                "auth_events", "login_challenges", "alembic_version",
+                "auth_events", "login_challenges", "data_exports", "alembic_version",
             ):
                 assert expected in names, names
+            cols = await conn.fetch(
+                "SELECT column_name FROM information_schema.columns "
+                "WHERE table_name='users' AND column_name IN "
+                "('delete_after', 'delete_requested_at')"
+            )
+            assert {r["column_name"] for r in cols} == {"delete_after", "delete_requested_at"}
             comment = await conn.fetchval(
                 "SELECT obj_description('auth_events'::regclass)"
             )

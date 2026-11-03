@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import shutil
 import threading
 import time
 from abc import ABC, abstractmethod
@@ -190,3 +191,22 @@ class ArchiveManager:
 
     def status(self) -> dict:
         return {"cloud": self.cloud_enabled, "last_error": self.last_error}
+
+    def purge_user(self, user_id: str) -> bool:
+        check_id(user_id, "user_id")
+        gone = False
+        local = self.local.root / user_id
+        if local.is_dir():
+            shutil.rmtree(local, ignore_errors=True)
+            gone = True
+        if self.remote is not None and hasattr(self.remote, "list_sessions"):
+            try:
+                for summary in self.remote.list_sessions(user_id):
+                    key = f"{user_id}/{summary['date']}/{summary['session_id']}.jsonl"
+                    try:
+                        self.remote.s3.delete_object(Bucket=self.remote.bucket, Key=key)
+                    except Exception:
+                        log.debug("remote archive delete failed key=%s", key, exc_info=True)
+            except Exception:
+                log.debug("remote archive purge failed user=%s", user_id, exc_info=True)
+        return gone

@@ -14,6 +14,7 @@ def test_healthz_and_pages(make_client):
     assert "Микрофон" in c.get("/").text
     assert "frame-ancestors 'none'" in c.get("/").headers["content-security-policy"]
     assert c.get("/privacy").status_code == 200
+    assert c.get("/account").status_code == 200
     assert c.get("/terms").status_code == 200
     assert "hateaboutyouone" in c.get("/terms").text
 

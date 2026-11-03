@@ -9,6 +9,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import shutil
 import threading
 import time
 import uuid
@@ -309,6 +310,40 @@ class MediaLibrary:
             "quota_bytes": self.quota_bytes,
             "files": len(idx.get("files") or {}),
         }
+
+    def dump_user(self, user_id: str) -> list[dict[str, Any]]:
+        """Metadata only — blobs are not inlined into the JSON export."""
+        uid = check_id(user_id, "user_id")
+        p = self.root / uid / "media" / "index.json"
+        if not p.exists():
+            return []
+        try:
+            idx = json.loads(p.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return []
+        files = idx.get("files") or {}
+        out = []
+        for mid, rec in files.items():
+            if not isinstance(rec, dict):
+                continue
+            out.append({
+                "id": mid,
+                "kind": rec.get("kind"),
+                "mime": rec.get("mime"),
+                "size": rec.get("size"),
+                "sha256": rec.get("sha256"),
+                "created_at": rec.get("created_at"),
+            })
+        return out
+
+    def purge_user(self, user_id: str) -> bool:
+        uid = check_id(user_id, "user_id")
+        # ChatStore.purge_user already removes `{root}/{uid}` including media/.
+        media = self.root / uid / "media"
+        if not media.exists():
+            return False
+        shutil.rmtree(media, ignore_errors=True)
+        return True
 
 
 class DownloadTokens:

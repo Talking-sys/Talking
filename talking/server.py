@@ -17,6 +17,7 @@ from .auth import authenticate_websocket, register_auth
 from .auth.crypto import WS_TOKEN_TTL_LOCAL_S, WS_TOKEN_TTL_S
 from .auth.deps import require_user
 from .auth.http import validate_auth_settings
+from .auth.privacy import collect_user_files, erase_user_files
 from .chat.events import ensure_hub, register_chat_ws
 from .chat.http import register_message_routes
 from .chat.messages import MessageStore
@@ -49,12 +50,39 @@ def _html(name: str, settings: Settings) -> HTMLResponse:
     return HTMLResponse(html)
 
 
+async def _privacy_worker(app: FastAPI) -> None:
+    privacy = getattr(app.state, "privacy", None)
+    if privacy is None:
+        return
+    while True:
+        try:
+            await privacy.process_due_deletions()
+            await privacy.purge_old_events()
+            await privacy.expire_exports()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.exception("privacy worker failed")
+        await asyncio.sleep(60)
+
+
 @asynccontextmanager
 async def _lifespan(app: FastAPI):
-    yield
-    engine = getattr(app.state, "auth_engine", None)
-    if engine is not None:
-        await engine.dispose()
+    task = None
+    if getattr(app.state, "privacy", None) is not None:
+        task = asyncio.create_task(_privacy_worker(app))
+    try:
+        yield
+    finally:
+        if task is not None:
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+        engine = getattr(app.state, "auth_engine", None)
+        if engine is not None:
+            await engine.dispose()
 
 
 def create_app(settings: Settings | None = None, engine: Engine | None = None,
@@ -122,6 +150,10 @@ def create_app(settings: Settings | None = None, engine: Engine | None = None,
     def index():
         return _html("index.html", s)
 
+    @app.get("/account", response_class=HTMLResponse)
+    def account_page():
+        return _html("account.html", s)
+
     @app.get("/favicon.ico")
     def favicon():
         from fastapi.responses import FileResponse
@@ -175,6 +207,14 @@ def create_app(settings: Settings | None = None, engine: Engine | None = None,
             "Preview images are downloaded, re-encoded (EXIF stripped) and served from Talking "
             "so other users' devices do not hotlink the origin. Opening a link uses a sandboxed "
             "iframe (no javascript: or data: URLs) or falls back to the system browser.</p>"
+            "<h2>Account deletion and export</h2>"
+            "<p>When accounts mode is on, you can export a JSON copy of your data or request "
+            "deletion from <a href='/account'>/account</a>. Deletion needs a recent sign-in "
+            "(10 minutes) and a cooling-off period (default 7 days, cancellable). After that "
+            "we hard-delete or anonymize identities, sessions, messages, translations, "
+            "attachments, and settings, revoke sessions, and close live sockets. Security "
+            "event logs keep only hashed user ids and drop events after 90 days. An admin "
+            "panel must never show message contents.</p>"
             "</body>"
         )
 
@@ -280,6 +320,12 @@ def create_app(settings: Settings | None = None, engine: Engine | None = None,
         return eng.status()
 
     register_chat(app)
+    privacy = getattr(app.state, "privacy", None)
+    if privacy is not None:
+        privacy.bind(
+            lambda uid, _app=app: collect_user_files(_app, uid),
+            lambda uid, _app=app: erase_user_files(_app, uid),
+        )
     register_voice_translate(app)
     if messages is None:
         messages = MessageStore(chat_store=app.state.chat_store)

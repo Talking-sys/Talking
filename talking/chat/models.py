@@ -124,7 +124,7 @@ class Message:
         return d
 
     def to_admin(self) -> dict[str, Any]:
-        """Admin views must never see note transcripts (owner spec / M11)."""
+        """Admin views must never see message text or transcripts (owner spec / M11)."""
         return redact_for_admin(self.to_public())
 
     @classmethod
@@ -142,6 +142,7 @@ class Message:
 
 
 ADMIN_REDACT_FIELDS = (
+    "text", "original_text", "revisions", "preview", "urls",
     "transcript", "translation", "src_lang", "tgt_lang", "translation_provider",
     "transcript_status", "transcript_reason", "transcript_provider",
     "transcript_model", "transcript_created_at", "transcript_duration",
@@ -149,9 +150,10 @@ ADMIN_REDACT_FIELDS = (
 
 
 def redact_for_admin(public: dict[str, Any]) -> dict[str, Any]:
-    """Strip speech-to-text fields so an admin panel cannot read note text."""
+    """Strip message contents so an admin panel cannot read dialogs or transcripts."""
     out = {k: v for k, v in public.items() if k not in ADMIN_REDACT_FIELDS}
     out["transcript_redacted"] = True
+    out["content_redacted"] = True
     return out
 
 

@@ -1,4 +1,4 @@
-# Auth (M10 stages 0–1 + phone)
+# Auth (M10 stages 0–1 + phone + stage 7 privacy)
 
 Copyright (C) 2026 hateaboutyouone. Contact: hateaboutyou111@icloud.com.
 
@@ -63,6 +63,9 @@ Endpoints:
 - `POST /api/auth/logout` / `POST /api/auth/logout-all`
 - `GET /api/auth/me` / `GET /api/auth/sessions` / `DELETE /api/auth/sessions/{id}`
 - `GET /api/auth/methods` / `DELETE /api/auth/methods/{id}` — unlink a sign-in method (not the last one)
+- `GET /api/auth/events` — the caller's own security events (no IP hashes, tokens, or phones)
+- `GET /api/auth/account` / `POST /api/auth/account/delete` / `POST /api/auth/account/delete/cancel`
+- `POST /api/auth/export` / `GET /api/auth/export/{id}` / `GET /api/auth/export/{id}/download`
 
 CSRF: `SameSite=Lax` + `Origin` / `Sec-Fetch-Site` + `X-CSRF-Token` on POST/PATCH/DELETE
 when a session cookie is present. CORS with credentials only for an explicit allowlist
@@ -120,7 +123,7 @@ Flow:
 
 Phones and codes are never logged. Identity `subject` is HMAC, not the number.
 
-## Left for later stages (2–7)
+## Left for later stages (2–6)
 
 | Stage | Scope |
 |---|---|
@@ -129,18 +132,41 @@ Phones and codes are never logged. Identity `subject` is HMAC, not the number.
 | 4 | Passkeys / WebAuthn. |
 | 5 | Sign in with Apple, equal prominence, private relay. |
 | 6 | Onboarding screens (Google / Apple / email / passkey / phone / anonymous). |
-| 7 | Account deletion, export, audit log UI; 90-day `auth_events` purge job. |
+
+## Stage 7 — deletion, export, audit
+
+Shipped on top of stages 0–1. `users.status` `deleting` / `deleted` is used.
+
+**Deletion** (`POST /api/auth/account/delete`):
+
+- Accounts mode only. Body `{ "confirm": "DELETE" }`.
+- Requires a **fresh** session (`auth_at` within 10 minutes — same window as phone link). Refresh does not count as a fresh login.
+- Configurable cooling-off: `AUTH_DELETE_GRACE_S` (default **7 days** / 604800 seconds). Cancellable with `POST /api/auth/account/delete/cancel` until `delete_after`.
+- After the grace period (or immediately when grace is 0) the job **hard-deletes** identities, sessions, recovery codes, login challenges, and export files; **anonymizes** the user row (`status=deleted`, nickname and langs cleared); wipes chat JSONL, attachments, history, and local archive for that user id; revokes leftover sessions and closes WebSockets.
+- A background worker (60 s) also runs due deletions, expires export files, and purges `auth_events` older than `AUTH_EVENTS_RETENTION_DAYS` (default 90).
+- Application logs still HMAC-hash `user_id` with `LOG_SALT`. `auth_events` keep the UUID until the 90-day purge (no phones/emails/tokens in `meta`).
+
+**Export** (`POST /api/auth/export`):
+
+- Async job (runs inline in test/dev) writing a JSON archive of the caller's profile, methods (decrypted phone/email when `DB_ENCRYPTION_KEY` exists, never the ciphertext or HMAC subject), sessions (no refresh hashes), security events, chat, attachment **metadata**, history, and archive segments.
+- Rate limit: **3 / 24 h per user**, **10 / 24 h per IP**.
+- Download is **authenticated** and **short-lived**: `GET /api/auth/export/{id}` mints a `download_token` (`AUTH_EXPORT_DOWNLOAD_TTL_S`, default 15 minutes). The file itself expires after `AUTH_EXPORT_TTL_S` (default 1 hour).
+- UI: `/account`.
+
+**Audit:** `GET /api/auth/events` lists the caller's sign-ins, method changes, session revocations, deletion/export events. Admin views use `Message.to_admin()` which redacts **text and transcripts** (`content_redacted`).
 
 ## Effort (implementation, not calendar)
 
 Stages 0–1 were scoped at about **2–3 focused days**. Phone is about **+1–1.5 days**
-(provider abstraction, E.164, abuse controls, link/no-merge). Remaining stages 2–7 are
-about **9–12 days** depending on Apple/Google console setup. Whole M10 plan including
-phone: roughly **12–16 days** of implementation once secrets and provider accounts exist.
+(provider abstraction, E.164, abuse controls, link/no-merge). Stage 7 (deletion / export /
+audit) is in this follow-up. Remaining stages 2–6 are about **7–10 days** depending on
+Apple/Google console setup. Whole M10 plan including phone: roughly **12–16 days** of
+implementation once secrets and provider accounts exist.
 
 ## Env (placeholders only — never commit real values)
 
 See `.env.example`: `AUTH_MODE`, `PUBLIC_ORIGIN`, `LOG_SALT`, `DB_ENCRYPTION_KEY`,
 `DATABASE_URL`, `APP_SECRET_KEY`, `SMS_PROVIDER`, `TWILIO_ACCOUNT_SID`,
 `TWILIO_AUTH_TOKEN`, `TWILIO_VERIFY_SERVICE_SID`, `SMS_COUNTRY_ALLOWLIST`,
-`SMS_DEFAULT_REGION`.
+`SMS_DEFAULT_REGION`, `AUTH_DELETE_GRACE_S`, `AUTH_EXPORT_TTL_S`,
+`AUTH_EXPORT_DOWNLOAD_TTL_S`, `AUTH_EVENTS_RETENTION_DAYS`.

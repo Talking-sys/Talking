@@ -10,6 +10,7 @@ from .crypto import new_id, utcnow
 from .types import (
     AuthEventRecord,
     ChallengeRecord,
+    ExportRecord,
     IdentityRecord,
     RecoveryRecord,
     SessionRecord,
@@ -20,6 +21,7 @@ from .types import (
 class AuthStorage(Protocol):
     async def create_user(self, user: UserRecord) -> UserRecord: ...
     async def get_user(self, user_id: str) -> UserRecord | None: ...
+    async def save_user(self, user: UserRecord) -> UserRecord: ...
     async def create_identity(self, ident: IdentityRecord) -> IdentityRecord: ...
     async def get_identity(self, provider: str, subject: str) -> IdentityRecord | None: ...
     async def get_identity_by_id(self, ident_id: str) -> IdentityRecord | None: ...
@@ -36,10 +38,19 @@ class AuthStorage(Protocol):
     async def get_recovery_by_hash(self, code_hash: str) -> RecoveryRecord | None: ...
     async def save_recovery(self, rec: RecoveryRecord) -> RecoveryRecord: ...
     async def log_event(self, ev: AuthEventRecord) -> None: ...
+    async def list_events(self, user_id: str, *, limit: int = 50) -> list[AuthEventRecord]: ...
+    async def purge_events(self, *, older_than: datetime) -> int: ...
     async def create_challenge(self, ch: ChallengeRecord) -> ChallengeRecord: ...
     async def get_challenge(self, challenge_id: str) -> ChallengeRecord | None: ...
     async def latest_challenge(self, subject_hash: str, kind: str) -> ChallengeRecord | None: ...
     async def save_challenge(self, ch: ChallengeRecord) -> ChallengeRecord: ...
+    async def list_due_deletions(self, *, now: datetime | None = None) -> list[UserRecord]: ...
+    async def purge_account_auth_rows(self, user_id: str) -> dict[str, int]: ...
+    async def create_export(self, rec: ExportRecord) -> ExportRecord: ...
+    async def get_export(self, export_id: str) -> ExportRecord | None: ...
+    async def list_exports(self, user_id: str) -> list[ExportRecord]: ...
+    async def save_export(self, rec: ExportRecord) -> ExportRecord: ...
+    async def list_expired_exports(self, *, now: datetime | None = None) -> list[ExportRecord]: ...
     async def aclose(self) -> None: ...
 
 
@@ -54,6 +65,7 @@ class MemoryAuthStorage:
         self.recovery: dict[str, RecoveryRecord] = {}
         self.events: list[AuthEventRecord] = []
         self.challenges: dict[str, ChallengeRecord] = {}
+        self.exports: dict[str, ExportRecord] = {}
 
     async def create_user(self, user: UserRecord) -> UserRecord:
         with self._lock:
@@ -62,6 +74,11 @@ class MemoryAuthStorage:
 
     async def get_user(self, user_id: str) -> UserRecord | None:
         return self.users.get(user_id)
+
+    async def save_user(self, user: UserRecord) -> UserRecord:
+        with self._lock:
+            self.users[user.id] = user
+        return user
 
     async def create_identity(self, ident: IdentityRecord) -> IdentityRecord:
         with self._lock:
@@ -152,6 +169,71 @@ class MemoryAuthStorage:
         with self._lock:
             self.events.append(ev)
 
+    async def list_events(self, user_id: str, *, limit: int = 50) -> list[AuthEventRecord]:
+        rows = [e for e in self.events if e.user_id == user_id]
+        rows.sort(key=lambda e: e.created_at, reverse=True)
+        if limit > 0:
+            rows = rows[:limit]
+        return rows
+
+    async def purge_events(self, *, older_than: datetime) -> int:
+        with self._lock:
+            keep = [e for e in self.events if e.created_at >= older_than]
+            n = len(self.events) - len(keep)
+            self.events = keep
+        return n
+
+    async def list_due_deletions(self, *, now: datetime | None = None) -> list[UserRecord]:
+        now = now or utcnow()
+        return [
+            u for u in self.users.values()
+            if u.status == "deleting" and u.delete_after is not None and u.delete_after <= now
+        ]
+
+    async def purge_account_auth_rows(self, user_id: str) -> dict[str, int]:
+        counts = {"identities": 0, "sessions": 0, "recovery": 0, "challenges": 0, "exports": 0}
+        with self._lock:
+            for ident_id in [i.id for i in self.identities.values() if i.user_id == user_id]:
+                self.identities.pop(ident_id, None)
+                counts["identities"] += 1
+            for sess_id in [s.id for s in self.sessions.values() if s.user_id == user_id]:
+                self.sessions.pop(sess_id, None)
+                counts["sessions"] += 1
+            for rec_id in [r.id for r in self.recovery.values() if r.user_id == user_id]:
+                self.recovery.pop(rec_id, None)
+                counts["recovery"] += 1
+            for ch_id in [c.id for c in self.challenges.values() if c.user_id == user_id]:
+                self.challenges.pop(ch_id, None)
+                counts["challenges"] += 1
+            for ex_id in [e.id for e in self.exports.values() if e.user_id == user_id]:
+                self.exports.pop(ex_id, None)
+                counts["exports"] += 1
+        return counts
+
+    async def create_export(self, rec: ExportRecord) -> ExportRecord:
+        with self._lock:
+            self.exports[rec.id] = rec
+        return rec
+
+    async def get_export(self, export_id: str) -> ExportRecord | None:
+        return self.exports.get(export_id)
+
+    async def list_exports(self, user_id: str) -> list[ExportRecord]:
+        rows = [e for e in self.exports.values() if e.user_id == user_id]
+        return sorted(rows, key=lambda e: e.created_at, reverse=True)
+
+    async def save_export(self, rec: ExportRecord) -> ExportRecord:
+        with self._lock:
+            self.exports[rec.id] = rec
+        return rec
+
+    async def list_expired_exports(self, *, now: datetime | None = None) -> list[ExportRecord]:
+        now = now or utcnow()
+        return [
+            e for e in self.exports.values()
+            if e.status in ("ready", "pending") and e.expires_at is not None and e.expires_at <= now
+        ]
+
     async def create_challenge(self, ch: ChallengeRecord) -> ChallengeRecord:
         with self._lock:
             self.challenges[ch.id] = ch
@@ -197,6 +279,7 @@ class PostgresAuthStorage:
                 native_lang=user.native_lang, ui_lang=user.ui_lang,
                 profile_private=user.profile_private, created_at=user.created_at,
                 updated_at=user.updated_at,
+                delete_requested_at=user.delete_requested_at, delete_after=user.delete_after,
             )
             db.add(row)
             await db.commit()
@@ -207,6 +290,23 @@ class PostgresAuthStorage:
         async with self._sf() as db:
             row = await db.get(User, _uuid(user_id))
             return _user_rec(row) if row else None
+
+    async def save_user(self, user: UserRecord) -> UserRecord:
+        from .models import User
+        async with self._sf() as db:
+            row = await db.get(User, _uuid(user.id))
+            if row is None:
+                return await self.create_user(user)
+            row.status = user.status
+            row.nickname = user.nickname
+            row.native_lang = user.native_lang
+            row.ui_lang = user.ui_lang
+            row.profile_private = user.profile_private
+            row.updated_at = user.updated_at
+            row.delete_requested_at = user.delete_requested_at
+            row.delete_after = user.delete_after
+            await db.commit()
+        return user
 
     async def create_identity(self, ident: IdentityRecord) -> IdentityRecord:
         from .models import Identity
@@ -372,6 +472,109 @@ class PostgresAuthStorage:
             ))
             await db.commit()
 
+    async def list_events(self, user_id: str, *, limit: int = 50) -> list[AuthEventRecord]:
+        from sqlalchemy import desc, select
+        from .models import AuthEvent
+        async with self._sf() as db:
+            stmt = (
+                select(AuthEvent)
+                .where(AuthEvent.user_id == _uuid(user_id))
+                .order_by(desc(AuthEvent.created_at))
+            )
+            if limit > 0:
+                stmt = stmt.limit(limit)
+            q = await db.execute(stmt)
+            return [_event_rec(r) for r in q.scalars().all()]
+
+    async def purge_events(self, *, older_than: datetime) -> int:
+        from sqlalchemy import delete as sql_delete
+        from .models import AuthEvent
+        async with self._sf() as db:
+            res = await db.execute(sql_delete(AuthEvent).where(AuthEvent.created_at < older_than))
+            await db.commit()
+            return res.rowcount or 0
+
+    async def list_due_deletions(self, *, now: datetime | None = None) -> list[UserRecord]:
+        from sqlalchemy import select
+        from .models import User
+        now = now or utcnow()
+        async with self._sf() as db:
+            q = await db.execute(
+                select(User).where(User.status == "deleting", User.delete_after.is_not(None), User.delete_after <= now)
+            )
+            return [_user_rec(r) for r in q.scalars().all()]
+
+    async def purge_account_auth_rows(self, user_id: str) -> dict[str, int]:
+        from sqlalchemy import delete as sql_delete
+        from .models import DataExport, Identity, LoginChallenge, RecoveryCode, Session
+        uid = _uuid(user_id)
+        counts = {"identities": 0, "sessions": 0, "recovery": 0, "challenges": 0, "exports": 0}
+        async with self._sf() as db:
+            for model, key, col in (
+                (Identity, "identities", Identity.user_id),
+                (Session, "sessions", Session.user_id),
+                (RecoveryCode, "recovery", RecoveryCode.user_id),
+                (LoginChallenge, "challenges", LoginChallenge.user_id),
+                (DataExport, "exports", DataExport.user_id),
+            ):
+                res = await db.execute(sql_delete(model).where(col == uid))
+                counts[key] = res.rowcount or 0
+            await db.commit()
+        return counts
+
+    async def create_export(self, rec: ExportRecord) -> ExportRecord:
+        from .models import DataExport
+        async with self._sf() as db:
+            db.add(_export_model(rec))
+            await db.commit()
+        return rec
+
+    async def get_export(self, export_id: str) -> ExportRecord | None:
+        from .models import DataExport
+        async with self._sf() as db:
+            row = await db.get(DataExport, _uuid(export_id))
+            return _export_rec(row) if row else None
+
+    async def list_exports(self, user_id: str) -> list[ExportRecord]:
+        from sqlalchemy import desc, select
+        from .models import DataExport
+        async with self._sf() as db:
+            q = await db.execute(
+                select(DataExport)
+                .where(DataExport.user_id == _uuid(user_id))
+                .order_by(desc(DataExport.created_at))
+            )
+            return [_export_rec(r) for r in q.scalars().all()]
+
+    async def save_export(self, rec: ExportRecord) -> ExportRecord:
+        from .models import DataExport
+        async with self._sf() as db:
+            row = await db.get(DataExport, _uuid(rec.id))
+            if row is None:
+                db.add(_export_model(rec))
+            else:
+                row.status = rec.status
+                row.ready_at = rec.ready_at
+                row.expires_at = rec.expires_at
+                row.error = rec.error
+                row.size_bytes = rec.size_bytes
+            await db.commit()
+        return rec
+
+    async def list_expired_exports(self, *, now: datetime | None = None) -> list[ExportRecord]:
+        from sqlalchemy import select
+        from .models import DataExport
+        now = now or utcnow()
+        async with self._sf() as db:
+            q = await db.execute(
+                select(DataExport).where(
+                    DataExport.status.in_(("ready", "pending")),
+                    DataExport.expires_at.is_not(None),
+                    DataExport.expires_at <= now,
+                )
+            )
+            return [_export_rec(r) for r in q.scalars().all()]
+
     async def create_challenge(self, ch: ChallengeRecord) -> ChallengeRecord:
         from .models import LoginChallenge
         async with self._sf() as db:
@@ -421,6 +624,35 @@ def _user_rec(row) -> UserRecord:
         id=str(row.id), status=row.status, nickname=row.nickname, native_lang=row.native_lang,
         ui_lang=row.ui_lang, profile_private=row.profile_private,
         created_at=_dt(row.created_at), updated_at=_dt(row.updated_at),
+        delete_requested_at=_dt(row.delete_requested_at) if row.delete_requested_at else None,
+        delete_after=_dt(row.delete_after) if row.delete_after else None,
+    )
+
+
+def _event_rec(row) -> AuthEventRecord:
+    return AuthEventRecord(
+        id=str(row.id), event=row.event, created_at=_dt(row.created_at),
+        user_id=str(row.user_id) if row.user_id else None, ip_hash=row.ip_hash,
+        meta=dict(row.extra or {}),
+    )
+
+
+def _export_rec(row) -> ExportRecord:
+    return ExportRecord(
+        id=str(row.id), user_id=str(row.user_id), status=row.status,
+        created_at=_dt(row.created_at),
+        ready_at=_dt(row.ready_at) if row.ready_at else None,
+        expires_at=_dt(row.expires_at) if row.expires_at else None,
+        error=row.error, size_bytes=row.size_bytes,
+    )
+
+
+def _export_model(rec: ExportRecord):
+    from .models import DataExport
+    return DataExport(
+        id=_uuid(rec.id), user_id=_uuid(rec.user_id), status=rec.status,
+        created_at=rec.created_at, ready_at=rec.ready_at, expires_at=rec.expires_at,
+        error=rec.error, size_bytes=rec.size_bytes,
     )
 
 

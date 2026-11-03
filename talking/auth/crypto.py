@@ -20,6 +20,11 @@ WS_TOKEN_TTL_S = 60
 WS_TOKEN_TTL_LOCAL_S = 3600
 FRESH_AUTH_S = 10 * 60
 CSRF_TTL_S = 30 * 24 * 3600
+# Default 7-day cooling-off before hard-delete/anonymize. Override with AUTH_DELETE_GRACE_S.
+DELETE_GRACE_S = 7 * 24 * 3600
+EXPORT_TTL_S = 60 * 60
+EXPORT_DOWNLOAD_TTL_S = 15 * 60
+AUTH_EVENTS_RETENTION_DAYS = 90
 
 ACCESS_COOKIE = "__Host-access"
 REFRESH_COOKIE = "__Secure-refresh"

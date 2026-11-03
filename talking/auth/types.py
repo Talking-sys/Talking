@@ -20,6 +20,8 @@ class UserRecord:
     profile_private: bool = True
     created_at: datetime = field(default_factory=_now)
     updated_at: datetime = field(default_factory=_now)
+    delete_requested_at: datetime | None = None
+    delete_after: datetime | None = None
 
 
 @dataclass
@@ -77,6 +79,18 @@ class AuthEventRecord:
     user_id: str | None = None
     ip_hash: str | None = None
     meta: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class ExportRecord:
+    id: str
+    user_id: str
+    status: str = "pending"  # pending | ready | failed | expired
+    created_at: datetime = field(default_factory=_now)
+    ready_at: datetime | None = None
+    expires_at: datetime | None = None
+    error: str | None = None
+    size_bytes: int | None = None
 
 
 @dataclass

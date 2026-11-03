@@ -5,6 +5,7 @@ Independent of transport (WebSocket / tests). No licensing, ads, or admin.
 from __future__ import annotations
 
 import logging
+import shutil
 import threading
 import time
 import uuid
@@ -181,6 +182,24 @@ class Engine:
                               sample_rate=self.s.sample_rate)
             self._histories[user_id] = h
         return h
+
+    def drop_history(self, user_id: str) -> bool:
+        try:
+            user_id = check_id(user_id)
+        except ValueError:
+            return False
+        h = self._histories.pop(user_id, None)
+        if h is not None:
+            try:
+                h.clear()
+                h.close()
+            except Exception:
+                pass
+        path = Path(self.s.data_dir) / "history" / user_id
+        if path.is_dir():
+            shutil.rmtree(path, ignore_errors=True)
+            return True
+        return h is not None
 
     def new_session(self, emit: Emit, user_id: str | None = None) -> Session:
         s = Session(self, emit, user_id)

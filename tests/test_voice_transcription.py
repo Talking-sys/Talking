@@ -269,15 +269,18 @@ def test_retention_purges_transcript(make_client):
 def test_admin_never_sees_transcript():
     msg = Message(
         id="m1", dialog_id="local", sender_id="local", type="voice_note",
-        created_at=1.0, transcript="secret speech", translation="секрет",
+        created_at=1.0, text="secret chat", transcript="secret speech", translation="секрет",
         transcript_status="done", src_lang="en",
     )
     redacted = msg.to_admin()
     assert "secret speech" not in str(redacted)
+    assert "secret chat" not in str(redacted)
     assert "секрет" not in str(redacted)
     assert redacted["transcript_redacted"] is True
+    assert redacted["content_redacted"] is True
     assert "transcript" not in redacted
-    public = {"transcript": "secret speech", "id": "m1"}
+    assert "text" not in redacted
+    public = {"transcript": "secret speech", "text": "secret chat", "id": "m1"}
     assert "secret" not in str(redact_for_admin(public))
 
 

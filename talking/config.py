@@ -111,6 +111,15 @@ class Settings:
     twilio_verify_service_sid: str = field(default_factory=lambda: _env("TWILIO_VERIFY_SERVICE_SID", ""))
     sms_country_allowlist: str = field(default_factory=lambda: _env("SMS_COUNTRY_ALLOWLIST", ""))
     sms_default_region: str = field(default_factory=lambda: _env("SMS_DEFAULT_REGION", ""))
+    # M10 stage 7 — GDPR deletion/export. Grace default is 7 days (604800 s).
+    auth_delete_grace_s: int = field(default_factory=lambda: _env_int("AUTH_DELETE_GRACE_S", 7 * 24 * 3600))
+    auth_export_ttl_s: int = field(default_factory=lambda: _env_int("AUTH_EXPORT_TTL_S", 3600))
+    auth_export_download_ttl_s: int = field(
+        default_factory=lambda: _env_int("AUTH_EXPORT_DOWNLOAD_TTL_S", 15 * 60)
+    )
+    auth_events_retention_days: int = field(
+        default_factory=lambda: _env_int("AUTH_EVENTS_RETENTION_DAYS", 90)
+    )
 
     s3_endpoint: str = field(default_factory=lambda: _env("S3_ENDPOINT", ""))
     s3_bucket: str = field(default_factory=lambda: _env("S3_BUCKET", ""))
