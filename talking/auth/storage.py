@@ -11,6 +11,7 @@ from .types import (
     AuthEventRecord,
     ChallengeRecord,
     IdentityRecord,
+    OAuthStateRecord,
     RecoveryRecord,
     SessionRecord,
     UserRecord,
@@ -40,6 +41,9 @@ class AuthStorage(Protocol):
     async def get_challenge(self, challenge_id: str) -> ChallengeRecord | None: ...
     async def latest_challenge(self, subject_hash: str, kind: str) -> ChallengeRecord | None: ...
     async def save_challenge(self, ch: ChallengeRecord) -> ChallengeRecord: ...
+    async def create_oauth_state(self, rec: OAuthStateRecord) -> OAuthStateRecord: ...
+    async def get_oauth_state_by_hash(self, state_hash: str) -> OAuthStateRecord | None: ...
+    async def save_oauth_state(self, rec: OAuthStateRecord) -> OAuthStateRecord: ...
     async def aclose(self) -> None: ...
 
 
@@ -54,6 +58,7 @@ class MemoryAuthStorage:
         self.recovery: dict[str, RecoveryRecord] = {}
         self.events: list[AuthEventRecord] = []
         self.challenges: dict[str, ChallengeRecord] = {}
+        self.oauth_states: dict[str, OAuthStateRecord] = {}
 
     async def create_user(self, user: UserRecord) -> UserRecord:
         with self._lock:
@@ -170,6 +175,25 @@ class MemoryAuthStorage:
         with self._lock:
             self.challenges[ch.id] = ch
         return ch
+
+    async def create_oauth_state(self, rec: OAuthStateRecord) -> OAuthStateRecord:
+        with self._lock:
+            for existing in self.oauth_states.values():
+                if existing.state_hash == rec.state_hash:
+                    raise ValueError("oauth state exists")
+            self.oauth_states[rec.id] = rec
+        return rec
+
+    async def get_oauth_state_by_hash(self, state_hash: str) -> OAuthStateRecord | None:
+        for rec in self.oauth_states.values():
+            if rec.state_hash == state_hash:
+                return rec
+        return None
+
+    async def save_oauth_state(self, rec: OAuthStateRecord) -> OAuthStateRecord:
+        with self._lock:
+            self.oauth_states[rec.id] = rec
+        return rec
 
     async def aclose(self) -> None:
         return None
@@ -412,6 +436,32 @@ class PostgresAuthStorage:
             await db.commit()
         return ch
 
+    async def create_oauth_state(self, rec: OAuthStateRecord) -> OAuthStateRecord:
+        from .models import OAuthState
+        async with self._sf() as db:
+            db.add(_oauth_model(rec))
+            await db.commit()
+        return rec
+
+    async def get_oauth_state_by_hash(self, state_hash: str) -> OAuthStateRecord | None:
+        from sqlalchemy import select
+        from .models import OAuthState
+        async with self._sf() as db:
+            q = await db.execute(select(OAuthState).where(OAuthState.state_hash == state_hash))
+            row = q.scalar_one_or_none()
+            return _oauth_rec(row) if row else None
+
+    async def save_oauth_state(self, rec: OAuthStateRecord) -> OAuthStateRecord:
+        from .models import OAuthState
+        async with self._sf() as db:
+            row = await db.get(OAuthState, _uuid(rec.id))
+            if row is None:
+                db.add(_oauth_model(rec))
+            else:
+                row.consumed_at = rec.consumed_at
+            await db.commit()
+        return rec
+
     async def aclose(self) -> None:
         return None
 
@@ -472,4 +522,27 @@ def _chal_model(ch: ChallengeRecord):
         attempts=ch.attempts, max_attempts=ch.max_attempts, created_at=ch.created_at,
         expires_at=ch.expires_at, consumed_at=ch.consumed_at, ip_hash=ch.ip_hash,
         user_id=_uuid(ch.user_id) if ch.user_id else None,
+    )
+
+
+def _oauth_rec(row) -> OAuthStateRecord:
+    return OAuthStateRecord(
+        id=str(row.id), state_hash=row.state_hash, nonce_hash=row.nonce_hash,
+        code_verifier_enc=row.code_verifier_enc, platform=row.platform, intent=row.intent,
+        redirect_uri=row.redirect_uri, client_id=row.client_id,
+        created_at=_dt(row.created_at), expires_at=_dt(row.expires_at),
+        consumed_at=_dt(row.consumed_at) if row.consumed_at else None,
+        ip_hash=row.ip_hash, user_id=str(row.user_id) if row.user_id else None,
+    )
+
+
+def _oauth_model(rec: OAuthStateRecord):
+    from .models import OAuthState
+    return OAuthState(
+        id=_uuid(rec.id), state_hash=rec.state_hash, nonce_hash=rec.nonce_hash,
+        code_verifier_enc=rec.code_verifier_enc, platform=rec.platform, intent=rec.intent,
+        redirect_uri=rec.redirect_uri, client_id=rec.client_id,
+        user_id=_uuid(rec.user_id) if rec.user_id else None,
+        created_at=rec.created_at, expires_at=rec.expires_at, consumed_at=rec.consumed_at,
+        ip_hash=rec.ip_hash,
     )

@@ -1,6 +1,7 @@
-"""Session, anonymous, recovery, and phone auth operations."""
+"""Session, anonymous, recovery, phone, and Google OIDC auth operations."""
 from __future__ import annotations
 
+import hmac
 import logging
 from datetime import timedelta
 from typing import Any
@@ -9,9 +10,13 @@ from .crypto import (
     ACCESS_TTL_S,
     CSRF_TTL_S,
     FRESH_AUTH_S,
+    OAUTH_TTL_S,
     PHONE_OTP_TTL_S,
     REFRESH_TTL_S,
+    decrypt_pii,
+    email_hmac,
     encrypt_pii,
+    google_subject,
     hash_token,
     ip_hash,
     new_id,
@@ -21,11 +26,23 @@ from .crypto import (
     user_log_id,
     utcnow,
 )
+from .google import (
+    GOOGLE_SCOPES,
+    GoogleOidc,
+    GoogleOidcError,
+    PLATFORMS,
+    is_https_redirect_uri,
+    new_oauth_token,
+    new_pkce_verifier,
+    pkce_s256_challenge,
+    unverified_nonce,
+)
 from .providers import PhoneProvider, StartResult
 from .storage import AuthStorage
 from .types import (
     ChallengeRecord,
     IdentityRecord,
+    OAuthStateRecord,
     RecoveryRecord,
     SessionRecord,
     UserRecord,
@@ -52,6 +69,7 @@ class AuthService:
         log_salt: bytes,
         enc_key: bytes | None,
         phone_provider: PhoneProvider | None = None,
+        google: GoogleOidc | None = None,
         sign_fn=None,
         allow_debug_otp: bool = False,
     ):
@@ -60,6 +78,7 @@ class AuthService:
         self.log_salt = log_salt
         self.enc_key = enc_key
         self.phone_provider = phone_provider
+        self.google = google
         self.sign = sign_fn
         self.allow_debug_otp = allow_debug_otp
 
@@ -376,3 +395,218 @@ class AuthService:
             raise AuthError(400, "last_method")
         await self.store.delete_identity(ident_id)
         await self._event("method_unlink", user_id=user_id, provider=ident.provider)
+
+    # --- Google OIDC ---
+
+    def google_status(self, *, accounts: bool) -> dict:
+        if not accounts or self.google is None:
+            return {
+                "enabled": False,
+                "platforms": {p: False for p in PLATFORMS},
+                "scopes": list(GOOGLE_SCOPES),
+            }
+        return self.google.public_status()
+
+    def _google_ready(self, platform: str | None = None) -> GoogleOidc:
+        if self.google is None or not self.google.enabled():
+            raise AuthError(503, "google_unconfigured")
+        if platform is not None and not self.google.platform_ready(platform):
+            raise AuthError(400, "unsupported_platform")
+        return self.google
+
+    async def start_google(
+        self,
+        *,
+        platform: str = "web",
+        intent: str = "login",
+        confirm: bool = False,
+        user_id: str | None = None,
+        session: SessionRecord | None = None,
+        ip: str | None = None,
+    ) -> dict:
+        platform = (platform or "web").strip().lower()
+        intent = (intent or "login").strip().lower()
+        if platform not in PLATFORMS:
+            raise AuthError(400, "unsupported_platform")
+        if intent not in ("login", "link"):
+            raise AuthError(400, "invalid_intent")
+        oidc = self._google_ready(platform)
+        if intent == "link":
+            if not user_id or session is None:
+                raise AuthError(401, "not signed in")
+            if not confirm:
+                raise AuthError(400, "confirm_required")
+            if not self.session_is_fresh(session):
+                raise AuthError(403, "fresh_session_required")
+        else:
+            user_id = None
+        redirect_uri = oidc.redirect_uri(platform)
+        if not is_https_redirect_uri(redirect_uri):
+            raise AuthError(503, "google_unconfigured")
+        client_id = oidc.client_id(platform)
+        verifier = new_pkce_verifier()
+        enc = encrypt_pii(self.enc_key, verifier)
+        if not enc:
+            raise AuthError(503, "google_unconfigured")
+        state = new_oauth_token()
+        nonce = new_oauth_token()
+        rec = OAuthStateRecord(
+            id=new_id(),
+            state_hash=hash_token(state),
+            nonce_hash=hash_token(nonce),
+            code_verifier_enc=enc,
+            platform=platform,
+            intent=intent,
+            redirect_uri=redirect_uri,
+            client_id=client_id,
+            expires_at=utcnow() + timedelta(seconds=OAUTH_TTL_S),
+            ip_hash=ip_hash(self.log_salt, ip) if ip else None,
+            user_id=user_id,
+        )
+        await self.store.create_oauth_state(rec)
+        url = oidc.authorization_url(
+            client_id=client_id, redirect_uri=redirect_uri,
+            state=state, nonce=nonce, challenge=pkce_s256_challenge(verifier),
+        )
+        await self._event("google_start", user_id=user_id, ip=ip, platform=platform, intent=intent)
+        return {
+            "ok": True,
+            "authorization_url": url,
+            "expires_in": OAUTH_TTL_S,
+            "platform": platform,
+            "intent": intent,
+        }
+
+    async def _load_google_state(self, state: str) -> OAuthStateRecord:
+        raw = (state or "").strip()
+        if not raw:
+            raise AuthError(400, "invalid_state")
+        rec = await self.store.get_oauth_state_by_hash(hash_token(raw))
+        if rec is None or rec.consumed_at is not None:
+            raise AuthError(401, "invalid_state")
+        if rec.expires_at < utcnow():
+            rec.consumed_at = utcnow()
+            await self.store.save_oauth_state(rec)
+            raise AuthError(401, "state_expired")
+        rec.consumed_at = utcnow()
+        await self.store.save_oauth_state(rec)
+        return rec
+
+    def _google_identity_fields(self, claims: dict) -> tuple[str, str | None, str | None, bool]:
+        sub = str(claims.get("sub") or "")
+        subject = google_subject(self.log_salt, sub)
+        email = claims.get("email")
+        ev = claims.get("email_verified")
+        verified = ev is True or ev == "true"
+        email_h = None
+        email_e = None
+        if isinstance(email, str) and email.strip() and verified:
+            email_h = email_hmac(self.log_salt, email)
+            email_e = encrypt_pii(self.enc_key, email.strip().lower())
+        return subject, email_h, email_e, verified
+
+    async def finish_google(
+        self,
+        *,
+        code: str,
+        state: str,
+        error: str = "",
+        ip: str | None = None,
+        user_agent: str | None = None,
+        current_user_id: str | None = None,
+    ) -> dict:
+        oidc = self._google_ready()
+        if error:
+            try:
+                await self._load_google_state(state)
+            except AuthError:
+                pass
+            raise AuthError(401, "oauth_denied")
+        code = (code or "").strip()
+        if not code:
+            raise AuthError(400, "code_required")
+        rec = await self._load_google_state(state)
+        if not oidc.platform_ready(rec.platform):
+            raise AuthError(503, "google_unconfigured")
+        verifier = decrypt_pii(self.enc_key, rec.code_verifier_enc)
+        if not verifier:
+            raise AuthError(401, "invalid_state")
+        try:
+            token_body = await oidc.exchange_code(
+                code=code,
+                code_verifier=verifier,
+                redirect_uri=rec.redirect_uri,
+                client_id=rec.client_id,
+                client_secret=oidc.client_secret(rec.platform),
+            )
+        except GoogleOidcError as e:
+            raise AuthError(401 if e.code != "google_unavailable" else 503, e.code)
+        id_token = str(token_body.get("id_token") or "")
+        nonce = unverified_nonce(id_token)
+        if not nonce or not hmac.compare_digest(hash_token(nonce), rec.nonce_hash):
+            raise AuthError(401, "nonce_mismatch")
+        try:
+            claims = await oidc.verify_id_token(id_token, audience=rec.client_id, nonce=nonce)
+        except GoogleOidcError as e:
+            raise AuthError(401 if e.code != "google_unavailable" else 503, e.code)
+        subject, email_h, email_e, email_verified = self._google_identity_fields(claims)
+        existing = await self.store.get_identity("google", subject)
+        if rec.intent == "link":
+            return await self._link_google(
+                rec, existing, subject, email_h, email_e, email_verified,
+                current_user_id=current_user_id, ip=ip,
+            )
+        created = False
+        if existing is None:
+            # Never look up by email — matching emails do not merge accounts.
+            user = UserRecord(id=new_id())
+            await self.store.create_user(user)
+            ident = IdentityRecord(
+                id=new_id(), user_id=user.id, provider="google", subject=subject,
+                email_hash=email_h, email_enc=email_e, email_verified=email_verified,
+            )
+            await self.store.create_identity(ident)
+            created = True
+        else:
+            user = await self.store.get_user(existing.user_id)
+            if user is None or user.status != "active":
+                raise AuthError(401, "invalid_id_token")
+        sess, refresh = await self.issue_session(user.id, ip=ip, user_agent=user_agent)
+        await self._event("google_login", user_id=user.id, ip=ip, created=int(created), platform=rec.platform)
+        return {
+            "user": self.public_user(user),
+            "session": sess,
+            "refresh": refresh,
+            "created": created,
+        }
+
+    async def _link_google(
+        self,
+        rec: OAuthStateRecord,
+        existing: IdentityRecord | None,
+        subject: str,
+        email_h: str | None,
+        email_e: str | None,
+        email_verified: bool,
+        *,
+        current_user_id: str | None,
+        ip: str | None,
+    ) -> dict:
+        if not rec.user_id:
+            raise AuthError(401, "not signed in")
+        if not current_user_id or current_user_id != rec.user_id:
+            raise AuthError(401, "not signed in")
+        user = await self.store.get_user(rec.user_id)
+        if user is None or user.status != "active":
+            raise AuthError(401, "not signed in")
+        if existing is not None:
+            if existing.user_id == user.id:
+                return {"ok": True, "linked": True, "already": True}
+            raise AuthError(409, "google_taken")
+        ident = IdentityRecord(
+            id=new_id(), user_id=user.id, provider="google", subject=subject,
+            email_hash=email_h, email_enc=email_e, email_verified=email_verified,
+        )
+        await self.store.create_identity(ident)
+        await self._event("google_link", user_id=user.id, ip=ip, platform=rec.platform)
+        return {"ok": True, "linked": True, "method": {"id": ident.id, "provider": "google"}}

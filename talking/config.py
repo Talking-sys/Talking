@@ -112,6 +112,31 @@ class Settings:
     sms_country_allowlist: str = field(default_factory=lambda: _env("SMS_COUNTRY_ALLOWLIST", ""))
     sms_default_region: str = field(default_factory=lambda: _env("SMS_DEFAULT_REGION", ""))
 
+    # Google Sign-In (OIDC). Off unless at least one platform client ID and an
+    # HTTPS redirect URI are set. Separate client IDs per platform; never reuse.
+    # Empty GOOGLE_OAUTH_ENABLED = auto (on when configured). 0/false forces off.
+    google_oauth_enabled: str = field(default_factory=lambda: _env("GOOGLE_OAUTH_ENABLED", ""))
+    google_client_id_web: str = field(default_factory=lambda: _env("GOOGLE_CLIENT_ID_WEB", ""))
+    google_client_id_android: str = field(default_factory=lambda: _env("GOOGLE_CLIENT_ID_ANDROID", ""))
+    google_client_id_ios: str = field(default_factory=lambda: _env("GOOGLE_CLIENT_ID_IOS", ""))
+    google_client_secret_web: str = field(default_factory=lambda: _env("GOOGLE_CLIENT_SECRET_WEB", ""))
+    google_redirect_uri: str = field(default_factory=lambda: _env("GOOGLE_REDIRECT_URI", ""))
+    google_redirect_uri_web: str = field(default_factory=lambda: _env("GOOGLE_REDIRECT_URI_WEB", ""))
+    google_redirect_uri_android: str = field(default_factory=lambda: _env("GOOGLE_REDIRECT_URI_ANDROID", ""))
+    google_redirect_uri_ios: str = field(default_factory=lambda: _env("GOOGLE_REDIRECT_URI_IOS", ""))
+    google_auth_url: str = field(
+        default_factory=lambda: _env("GOOGLE_AUTH_URL", "https://accounts.google.com/o/oauth2/v2/auth")
+    )
+    google_token_url: str = field(
+        default_factory=lambda: _env("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
+    )
+    google_jwks_url: str = field(
+        default_factory=lambda: _env("GOOGLE_JWKS_URL", "https://www.googleapis.com/oauth2/v3/certs")
+    )
+    google_issuer: str = field(
+        default_factory=lambda: _env("GOOGLE_ISSUER", "https://accounts.google.com")
+    )
+
     s3_endpoint: str = field(default_factory=lambda: _env("S3_ENDPOINT", ""))
     s3_bucket: str = field(default_factory=lambda: _env("S3_BUCKET", ""))
     s3_region: str = field(default_factory=lambda: _env("S3_REGION", ""))

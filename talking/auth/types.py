@@ -95,3 +95,21 @@ class ChallengeRecord:
     consumed_at: datetime | None = None
     ip_hash: str | None = None
     user_id: str | None = None
+
+
+@dataclass
+class OAuthStateRecord:
+    """Server-side OIDC dance (PKCE verifier, nonce hash). Never send to the browser."""
+    id: str
+    state_hash: str
+    nonce_hash: str
+    code_verifier_enc: str
+    platform: str
+    intent: str  # login | link
+    redirect_uri: str
+    client_id: str
+    created_at: datetime = field(default_factory=_now)
+    expires_at: datetime = field(default_factory=lambda: _now() + timedelta(minutes=10))
+    consumed_at: datetime | None = None
+    ip_hash: str | None = None
+    user_id: str | None = None

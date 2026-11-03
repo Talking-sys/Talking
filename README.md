@@ -65,6 +65,7 @@ Compose sets `DATABASE_URL` and `REDIS_URL`. The app still runs if those pings f
 | `LOG_SALT` | empty | HMAC salt for user ids in logs. Required in production |
 | `DB_ENCRYPTION_KEY` | empty | AES-GCM for phone (and later email) at rest |
 | `SMS_PROVIDER` | `console` | `console` = local/dev sink only (refused in production). `twilio` = Verify SMS (voice is explicit fallback). See `docs/AUTH.md` |
+| `GOOGLE_CLIENT_ID_WEB` / `_ANDROID` / `_IOS` | empty | Google Sign-In (OIDC). Off unless set plus an HTTPS `GOOGLE_REDIRECT_URI`. Web also needs `GOOGLE_CLIENT_SECRET_WEB`. See `docs/AUTH.md` |
 | `S3_ENDPOINT` `S3_BUCKET` `S3_ACCESS_KEY` `S3_SECRET_KEY` `S3_REGION` | empty | R2/MinIO/AWS archive. Empty = local JSONL |
 | `COMMERCIAL_API_URL` / `COMMERCIAL_API_TOKEN` / `COMMERCIAL_WEBHOOK_SECRET` | empty | Proprietary service. Empty = stubs |
 | `COMMERCIAL_DEV_ENTITLEMENTS` / `COMMERCIAL_DEV_PREMIUM` | empty / off | Local premium stub (ignored in production) |
@@ -125,7 +126,7 @@ Never put real keys in source. Empty `SDK_API_KEYS` disables the SDK routes.
 ## Docs
 
 - `docs/ARCHITECTURE.md` — folders and API boundary
-- `docs/AUTH.md` — M10 stages 0–1 + phone (sessions, CSRF, Twilio Verify)
+- `docs/AUTH.md` — M10 sessions, CSRF, phone (Twilio Verify), Google OIDC
 - `docs/VOICE_TRANSCRIPTION.md` — premium on-demand note STT, merge notes vs #5 / editing
 - `docs/ROADMAP.md` — next PRs, including unverified vendor names
 - `docs/sdk/` — game-embed SDK (EN + RU), plan, OpenAPI

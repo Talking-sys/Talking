@@ -52,7 +52,7 @@ def test_migrations_up_down():
             names = {r["tablename"] for r in tables}
             for expected in (
                 "users", "identities", "sessions", "recovery_codes",
-                "auth_events", "login_challenges", "alembic_version",
+                "auth_events", "login_challenges", "oauth_states", "alembic_version",
             ):
                 assert expected in names, names
             comment = await conn.fetchval(
