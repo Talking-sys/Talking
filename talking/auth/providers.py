@@ -1,9 +1,9 @@
 """SMS / voice verification providers.
 
-Twilio Verify is the production adapter (SMS + voice, OTP + attempt limits
-live on Twilio's side, fraud guard). Vonage Verify is documented as the
-alternative but not wired in this stage. The console sink is for AUTH_MODE
-tests and local development — it never prints the destination number or code.
+Twilio Verify SMS is the production path. Voice call is an explicit user-chosen
+fallback only (never the default). Phone codes are not delivered by email.
+The console sink is for local development and tests — it never prints the
+destination number or code, and is refused when APP_ENV=production.
 """
 from __future__ import annotations
 
@@ -67,13 +67,19 @@ class TwilioVerifyProvider:
         return f"https://verify.twilio.com/v2/Services/{self.service_sid}/{tail}"
 
     async def start(self, phone_e164: str, channel: str) -> StartResult:
-        channel = "call" if channel == "call" else "sms"
+        # Twilio Verify also supports email; we never send phone codes that way.
+        if channel == "call":
+            twilio_channel = "call"
+        elif channel == "sms":
+            twilio_channel = "sms"
+        else:
+            return StartResult(ok=False, provider=self.name, error="invalid_channel")
         try:
             async with httpx.AsyncClient(timeout=self.timeout) as client:
                 r = await client.post(
                     self._url("Verifications"),
                     auth=(self.account_sid, self.auth_token),
-                    data={"To": phone_e164, "Channel": channel},
+                    data={"To": phone_e164, "Channel": twilio_channel},
                 )
             if r.status_code >= 400:
                 log.warning("twilio verify start status=%s", r.status_code)
@@ -113,16 +119,38 @@ class VonageVerifyProvider:
         return False
 
 
+def sms_provider_name(settings) -> str:
+    return (getattr(settings, "sms_provider", None) or "").strip().lower()
+
+
+def twilio_credentials(settings) -> tuple[str, str, str]:
+    sid = (getattr(settings, "twilio_account_sid", None) or "").strip()
+    token = (getattr(settings, "twilio_auth_token", None) or "").strip()
+    service = (getattr(settings, "twilio_verify_service_sid", None) or "").strip()
+    return sid, token, service
+
+
+def twilio_configured(settings) -> bool:
+    sid, token, service = twilio_credentials(settings)
+    return bool(sid and token and service)
+
+
 def build_phone_provider(settings) -> PhoneProvider:
-    name = (getattr(settings, "sms_provider", None) or "console").strip().lower()
+    name = sms_provider_name(settings) or "console"
+    production = bool(getattr(settings, "production", False))
     if name in ("twilio", "twilio_verify"):
-        sid = getattr(settings, "twilio_account_sid", "") or ""
-        token = getattr(settings, "twilio_auth_token", "") or ""
-        service = getattr(settings, "twilio_verify_service_sid", "") or ""
-        if sid and token and service:
-            return TwilioVerifyProvider(sid, token, service)
-        log.info("twilio env incomplete; using console SMS sink")
-        return ConsoleDevSink()
+        if not twilio_configured(settings):
+            raise RuntimeError(
+                "TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, and TWILIO_VERIFY_SERVICE_SID "
+                "are required when SMS_PROVIDER=twilio"
+            )
+        sid, token, service = twilio_credentials(settings)
+        return TwilioVerifyProvider(sid, token, service)
+    if production:
+        raise RuntimeError(
+            "SMS_PROVIDER=console is refused when APP_ENV=production; "
+            "set SMS_PROVIDER=twilio with Twilio Verify credentials"
+        )
     if name == "vonage":
         return VonageVerifyProvider()
     return ConsoleDevSink()

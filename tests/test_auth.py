@@ -61,6 +61,76 @@ def test_secret_required_in_production(monkeypatch, tmp_path):
         create_app(Settings())
 
 
+def _production_accounts_env(monkeypatch, tmp_path, **extra):
+    monkeypatch.setenv("APP_ENV", "production")
+    monkeypatch.setenv("AUTH_MODE", "accounts")
+    monkeypatch.setenv("APP_SECRET_KEY", "k" * 32)
+    monkeypatch.setenv("LOG_SALT", "s" * 32)
+    monkeypatch.setenv("DATABASE_URL", "postgresql://talking:talking@localhost:5432/talking")
+    monkeypatch.setenv("APP_DATA_DIR", str(tmp_path))
+    for key, value in extra.items():
+        if value is None:
+            monkeypatch.delenv(key, raising=False)
+        else:
+            monkeypatch.setenv(key, value)
+
+
+def test_production_refuses_console_sms_provider(monkeypatch, tmp_path):
+    _production_accounts_env(monkeypatch, tmp_path, SMS_PROVIDER="console")
+    from talking.config import Settings
+    from talking.server import create_app
+    with pytest.raises(RuntimeError, match="SMS_PROVIDER"):
+        create_app(Settings())
+
+
+def test_production_refuses_unset_sms_provider(monkeypatch, tmp_path):
+    _production_accounts_env(monkeypatch, tmp_path, SMS_PROVIDER=None)
+    from talking.config import Settings
+    from talking.server import create_app
+    with pytest.raises(RuntimeError, match="SMS_PROVIDER"):
+        create_app(Settings())
+
+
+def test_production_refuses_twilio_without_credentials(monkeypatch, tmp_path):
+    _production_accounts_env(monkeypatch, tmp_path, SMS_PROVIDER="twilio")
+    monkeypatch.delenv("TWILIO_ACCOUNT_SID", raising=False)
+    monkeypatch.delenv("TWILIO_AUTH_TOKEN", raising=False)
+    monkeypatch.delenv("TWILIO_VERIFY_SERVICE_SID", raising=False)
+    from talking.config import Settings
+    from talking.server import create_app
+    with pytest.raises(RuntimeError, match="TWILIO"):
+        create_app(Settings())
+
+
+def test_production_accepts_twilio_verify(monkeypatch, tmp_path):
+    _production_accounts_env(
+        monkeypatch, tmp_path,
+        SMS_PROVIDER="twilio",
+        TWILIO_ACCOUNT_SID="ACtest",
+        TWILIO_AUTH_TOKEN="token",
+        TWILIO_VERIFY_SERVICE_SID="VAtest",
+    )
+    from talking.auth.http import validate_auth_settings
+    from talking.auth.providers import build_phone_provider
+    from talking.config import Settings
+    settings = Settings()
+    validate_auth_settings(settings)
+    assert build_phone_provider(settings).name == "twilio"
+
+
+def test_twilio_incomplete_does_not_fallback_to_console(monkeypatch, tmp_path):
+    monkeypatch.setenv("APP_ENV", "test")
+    monkeypatch.setenv("SMS_PROVIDER", "twilio")
+    monkeypatch.delenv("TWILIO_ACCOUNT_SID", raising=False)
+    monkeypatch.delenv("TWILIO_AUTH_TOKEN", raising=False)
+    monkeypatch.delenv("TWILIO_VERIFY_SERVICE_SID", raising=False)
+    monkeypatch.setenv("APP_DATA_DIR", str(tmp_path))
+    from talking.auth.providers import build_phone_provider
+    from talking.config import Settings
+    with pytest.raises(RuntimeError, match="TWILIO"):
+        build_phone_provider(Settings())
+
+
 def test_anonymous_create_and_recover(make_client):
     c = _client(make_client)
     r = _anon(c)

@@ -6,9 +6,11 @@ This document describes **what shipped** in the first auth PR and **what is left
 Google OAuth still requests only `openid email profile` — see `docs/GOOGLE_SCOPES.md`.
 Commercial entitlements stay behind `COMMERCIAL_API_URL` and are keyed by opaque user UUIDs.
 
-The owner later **added phone number sign-in / sign-up** (SMS or voice call). That
-overrides the original “no SMS in v1” line in `docs/specs/OWNER_SPEC.md` §13 and
-`docs/ROADMAP.md` M10. The verbatim spec is unchanged; the addendum records the decision.
+The owner later **added phone number sign-in / sign-up**. Codes arrive by **SMS**.
+That overrides the original “no SMS in v1” line in `docs/specs/OWNER_SPEC.md` §13
+and `docs/ROADMAP.md` M10. The verbatim spec is unchanged; the addendum records
+the decision (including the later change that SMS via Twilio Verify is the
+production path).
 
 ## Modes
 
@@ -19,6 +21,9 @@ overrides the original “no SMS in v1” line in `docs/specs/OWNER_SPEC.md` §1
 
 `AUTH_MODE=local` is **refused** when `APP_ENV=production`. Production also requires
 `APP_SECRET_KEY` (≥32 chars) and `LOG_SALT`. Production `accounts` requires `DATABASE_URL`.
+Production also requires `SMS_PROVIDER=twilio` plus `TWILIO_ACCOUNT_SID`,
+`TWILIO_AUTH_TOKEN`, and `TWILIO_VERIFY_SERVICE_SID`. `SMS_PROVIDER=console` (or
+unset, which defaults to console) is **refused** in production.
 
 ## Stage 0 — Postgres foundation
 
@@ -82,17 +87,30 @@ Chat storage remains file-based, keyed by the user UUID (or `local` in local mod
 
 **Provider:** [Twilio Verify](https://www.twilio.com/docs/verify) over **httpx** (no Twilio SDK).
 
-Why Twilio Verify: one API for **SMS and voice** (“call me instead”), OTP generation and
-attempt limits on their side, and a fraud/pumping guard. Vonage Verify is the documented
-alternative (`SMS_PROVIDER=vonage` returns “not configured” until an adapter is written).
-Dev and tests use `SMS_PROVIDER=console` (hash of a 6-digit code, 10 min TTL, 5 attempts,
-single use; `debug_code` is returned only when `APP_ENV` is test/development).
+**SMS is the production path.** The owner reversed the earlier “no SMS in v1”
+decision: verification codes must arrive by SMS. Twilio Verify SMS is the
+primary/default channel. A voice call (“call me instead”) is an **explicit
+user-chosen fallback only**, never the default. Phone codes are **not**
+delivered by email (`channel=email` is rejected).
+
+Why Twilio Verify: OTP generation, attempt limits, and a fraud/pumping guard
+live on Twilio’s side; the same API can place the fallback voice call when the
+user asks. Vonage Verify remains a documented alternative (`SMS_PROVIDER=vonage`
+returns “not configured” until an adapter is written) and is refused in
+production.
+
+`SMS_PROVIDER=console` is a **local development / test sink only** (hash of a
+6-digit code, 10 min TTL, 5 attempts, single use; `debug_code` is returned only
+when `APP_ENV` is test/development). It never prints the destination number or
+code. Startup (and `POST /api/auth/phone/start`) refuses console or missing
+Twilio credentials when `APP_ENV=production`.
 
 Flow:
 
-1. `POST /api/auth/phone/start` `{phone, channel: "sms"|"call"}` — E.164 via `phonenumbers`
-   (Apache-2.0). Country allowlist `SMS_COUNTRY_ALLOWLIST`. Rate limits: **3 sends / 15 min
-   per number**, **10 / hour per IP**, **60 s resend cooldown**.
+1. `POST /api/auth/phone/start` `{phone, channel?: "sms"|"call"}` — omitted
+   channel defaults to **`sms`**. E.164 via `phonenumbers` (Apache-2.0). Country
+   allowlist `SMS_COUNTRY_ALLOWLIST`. Rate limits: **3 sends / 15 min per
+   number**, **10 / hour per IP**, **60 s resend cooldown**.
 2. `POST /api/auth/phone/verify` `{phone, code}` — find or **create** an account (never
    merge with a different signed-in user).
 3. `POST /api/auth/phone/link` `{phone, code}` — attach the number to the **current** user.

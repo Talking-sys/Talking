@@ -1,12 +1,16 @@
 """Phone sign-in / sign-up (dev SMS sink)."""
 from __future__ import annotations
 
+import asyncio
 from datetime import timedelta
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import phonenumbers
+import pytest
 from phonenumbers import PhoneNumberFormat
 
 from talking.auth.crypto import utcnow
+from talking.auth.phone_util import DEFAULT_PHONE_CHANNEL, PhoneError, normalize_phone_channel
 
 from tests.test_auth import ACCOUNTS, _anon, _h
 
@@ -106,6 +110,83 @@ def test_phone_call_channel(make_client):
         headers=_h(),
     )
     assert v.status_code == 200
+
+
+def test_phone_default_channel_is_sms(make_client):
+    c = _client(make_client)
+    phone = _phone("GB")
+    r = c.post("/api/auth/phone/start", json={"phone": phone}, headers=_h())
+    assert r.status_code == 200, r.text
+    assert r.json()["channel"] == "sms"
+    assert DEFAULT_PHONE_CHANNEL == "sms"
+
+
+def test_phone_call_me_instead_alias(make_client):
+    c = _client(make_client)
+    r = _start(c, _phone("FR"), channel="call me instead")
+    assert r.status_code == 200, r.text
+    assert r.json()["channel"] == "call"
+
+
+def test_phone_email_channel_rejected(make_client):
+    c = _client(make_client)
+    r = _start(c, _phone(), channel="email")
+    assert r.status_code == 400
+    assert r.json()["detail"] == "invalid_channel"
+
+
+def test_production_phone_start_refuses_console_sink(make_client):
+    c = _client(make_client)
+    c.app_.state.settings.app_env = "production"
+    r = _start(c, _phone("CA"))
+    assert r.status_code == 503
+    assert r.json()["detail"] == "sms_unconfigured"
+
+
+def test_normalize_phone_channel_sms_default():
+    assert normalize_phone_channel(None) == "sms"
+    assert normalize_phone_channel("") == "sms"
+    assert normalize_phone_channel("SMS") == "sms"
+    assert normalize_phone_channel("voice") == "call"
+    with pytest.raises(PhoneError, match="invalid_channel"):
+        normalize_phone_channel("email")
+    with pytest.raises(PhoneError, match="invalid_channel"):
+        normalize_phone_channel("whatsapp")
+
+
+def test_twilio_verify_sends_sms_never_email():
+    from talking.auth.providers import TwilioVerifyProvider
+
+    provider = TwilioVerifyProvider("ACtest", "token", "VAtest")
+    captured = []
+
+    mock_response = MagicMock()
+    mock_response.status_code = 201
+    mock_response.json.return_value = {"sid": "VE123"}
+
+    mock_client = AsyncMock()
+    mock_client.post = AsyncMock(return_value=mock_response)
+    mock_client.__aenter__.return_value = mock_client
+    mock_client.__aexit__.return_value = False
+
+    async def _run():
+        with patch("talking.auth.providers.httpx.AsyncClient", return_value=mock_client):
+            sms = await provider.start("+15555550100", "sms")
+            captured.append(mock_client.post.call_args.kwargs["data"]["Channel"])
+            email = await provider.start("+15555550100", "email")
+            call = await provider.start("+15555550100", "call")
+            captured.append(mock_client.post.call_args.kwargs["data"]["Channel"])
+            return sms, email, call
+
+    sms, email, call = asyncio.run(_run())
+    assert sms.ok and sms.provider == "twilio"
+    assert not email.ok
+    assert email.error == "invalid_channel"
+    assert call.ok
+    assert captured == ["sms", "call"]
+    for args, kwargs in mock_client.post.call_args_list:
+        assert kwargs["data"]["Channel"] in ("sms", "call")
+        assert kwargs["data"]["Channel"] != "email"
 
 
 def test_phone_link_to_existing_account(make_client):

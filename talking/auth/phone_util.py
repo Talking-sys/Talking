@@ -9,6 +9,28 @@ class PhoneError(ValueError):
     pass
 
 
+DEFAULT_PHONE_CHANNEL = "sms"
+ALLOWED_PHONE_CHANNELS = frozenset({"sms", "call"})
+_CALL_ALIASES = frozenset({
+    "call", "voice", "call_me", "call-me", "callme",
+    "call_me_instead", "call-me-instead",
+})
+
+
+def normalize_phone_channel(raw: str | None) -> str:
+    """SMS is the default. Voice is only an explicit 'call me instead' fallback.
+
+    Email is never a phone-code channel.
+    """
+    value = (raw if raw is not None else DEFAULT_PHONE_CHANNEL)
+    value = str(value).strip().lower().replace(" ", "_").replace("-", "_")
+    if value in ("", "sms"):
+        return "sms"
+    if value in _CALL_ALIASES:
+        return "call"
+    raise PhoneError("invalid_channel")
+
+
 def parse_e164(raw: str, default_region: str = "") -> str:
     text = (raw or "").strip()
     if not text:

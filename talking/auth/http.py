@@ -20,8 +20,8 @@ from .crypto import (
 )
 from .deps import AuthMiddleware, read_refresh_cookie, require_user
 from .logfilter import install_auth_log_filter
-from .phone_util import PhoneError, country_allowed, parse_e164
-from .providers import build_phone_provider
+from .phone_util import PhoneError, country_allowed, normalize_phone_channel, parse_e164
+from .providers import build_phone_provider, sms_provider_name, twilio_configured
 from .rate_limit import AuthRateLimiter
 from .service import AuthError, AuthService
 from .sockets import SocketRegistry
@@ -42,6 +42,22 @@ def validate_auth_settings(settings) -> None:
         raise RuntimeError("LOG_SALT required in production")
     if settings.production and mode == "accounts" and not (settings.database_url or "").strip():
         raise RuntimeError("DATABASE_URL required when AUTH_MODE=accounts in production")
+    if settings.production:
+        provider = sms_provider_name(settings) or "console"
+        if provider in ("console", ""):
+            raise RuntimeError(
+                "SMS_PROVIDER=console is refused when APP_ENV=production; "
+                "set SMS_PROVIDER=twilio with Twilio Verify credentials"
+            )
+        if provider not in ("twilio", "twilio_verify"):
+            raise RuntimeError(
+                f"SMS_PROVIDER={provider} is refused when APP_ENV=production; use twilio"
+            )
+        if not twilio_configured(settings):
+            raise RuntimeError(
+                "TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, and TWILIO_VERIFY_SERVICE_SID "
+                "are required when APP_ENV=production"
+            )
 
 
 def _https_request(request: Request) -> bool:
@@ -257,9 +273,12 @@ def register_auth(app: FastAPI) -> None:
             raise HTTPException(400, str(e))
         if not country_allowed(phone, s.sms_country_allowlist):
             raise HTTPException(403, "country_not_allowed")
-        channel = str(data.get("channel") or "sms").strip().lower()
-        if channel in ("voice", "call_me", "call-me"):
-            channel = "call"
+        try:
+            channel = normalize_phone_channel(data.get("channel"))
+        except PhoneError as e:
+            raise HTTPException(400, str(e))
+        if s.production and getattr(svc.phone_provider, "name", "") == "console":
+            raise HTTPException(503, "sms_unconfigured")
         ip = client_ip(request)
         subj = phone_subject(svc.log_salt, phone)
         if not limiter.allow(f"auth:phone:num:{subj}", 3, 15 * 60):

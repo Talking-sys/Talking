@@ -104,6 +104,7 @@ class Settings:
     public_origin: str = field(default_factory=lambda: _env("PUBLIC_ORIGIN", ""))
     log_salt: str = field(default_factory=lambda: _env("LOG_SALT", ""))
     db_encryption_key: str = field(default_factory=lambda: _env("DB_ENCRYPTION_KEY", ""))
+    # console = local/dev sink only (refused in production). twilio = Verify SMS.
     sms_provider: str = field(default_factory=lambda: _env("SMS_PROVIDER", "console"))
     twilio_account_sid: str = field(default_factory=lambda: _env("TWILIO_ACCOUNT_SID", ""))
     twilio_auth_token: str = field(default_factory=lambda: _env("TWILIO_AUTH_TOKEN", ""))

@@ -20,4 +20,4 @@
 
 ## Owner addendum (2026-11-03) — not part of the verbatim block above
 
-The paragraph 13 sentence «SMS-вход — не в первой версии» is **overridden** by a later owner decision: sign-in and sign-up by **mobile phone number** are in v1. Verification is an SMS code **or** a voice call («call me instead»). Matching phone numbers do **not** auto-merge accounts. Implementation notes: `docs/AUTH.md`. The original wording above is kept as historical evidence of the first specification.
+The paragraph 13 sentence «SMS-вход — не в первой версии» is **overridden** by later owner decisions: sign-in and sign-up by **mobile phone number** are in v1, and verification codes **must arrive by SMS**. Twilio Verify SMS is the production path (`SMS_PROVIDER=console` is a local/dev sink only and is refused when `APP_ENV=production`). A voice call («call me instead») is an explicit user-chosen fallback, never the default. Phone codes are not delivered by email. Matching phone numbers do **not** auto-merge accounts. Implementation notes: `docs/AUTH.md`. The original wording above is kept as historical evidence of the first specification.
