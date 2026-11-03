@@ -2,7 +2,8 @@
 
 Copyright (C) 2026 hateaboutyouone. Contact: hateaboutyou111@icloud.com.
 
-This document describes **what shipped** in the first auth PR and **what is left**.
+This document describes **what shipped** in the first auth PR, the anonymous-account
+product follow-up, and **what is left**.
 Google OAuth still requests only `openid email profile` — see `docs/GOOGLE_SCOPES.md`.
 Commercial entitlements stay behind `COMMERCIAL_API_URL` and are keyed by opaque user UUIDs.
 
@@ -30,7 +31,8 @@ unset, which defaults to console) is **refused** in production.
 - SQLAlchemy 2 (async, asyncpg) + Alembic.
 - Initial migration `001_auth_foundation`: `users`, `identities`, `sessions`,
   `recovery_codes`, `auth_events` (no PII, **90-day retention** comment),
-  `login_challenges` (phone OTP / future email codes).
+  `login_challenges` (phone OTP / future email codes). Follow-up `002_anonymous_accounts`
+  adds `users.last_seen_at` for inactivity expiry.
 - `users.status` is `active | deleting | deleted`. Nickname unique and nullable.
   `profile_private` defaults true. User ids are UUIDs.
 - `identities` unique (`provider`, `subject`). Providers in this PR: `anonymous`, `phone`.
@@ -58,7 +60,10 @@ In production the `__Host-` / `__Secure-` names are required (HTTPS).
 Endpoints:
 
 - `POST /api/auth/anonymous` — create anonymous account; return a recovery code **once**; store hash only
-- `POST /api/auth/recover` — recovery code → new session (single use)
+- `GET /api/auth/anonymous/policy` — public capability catalog + current anonymous limits
+- `POST /api/auth/recover` — recovery code → new session (single use; replacement policy below)
+- `POST /api/auth/recovery/rotate` — signed-in: invalidate unused codes and show a new one once
+- `POST /api/auth/upgrade/confirm` — explicit merge of anonymous data into a different existing account
 - `POST /api/auth/refresh`
 - `POST /api/auth/logout` / `POST /api/auth/logout-all`
 - `GET /api/auth/me` / `GET /api/auth/sessions` / `DELETE /api/auth/sessions/{id}`
@@ -82,6 +87,112 @@ Auth endpoints are rate-limited (Redis if `REDIS_URL` is up, else memory). Logs 
 `user_id` with `LOG_SALT` and redact phones, emails, tokens, and codes.
 
 Chat storage remains file-based, keyed by the user UUID (or `local` in local mode).
+
+## Anonymous accounts (product)
+
+Anonymous is a **first-class hosted account**, not a throwaway cookie. Creation stores
+only a UUID, an `anonymous` identity, hashed recovery code, and hashed IP on the session.
+No phone, email, or nickname is required.
+
+`AUTH_MODE=local` is the home Wi-Fi translator and is **not** subject to these limits.
+
+### Capability limits
+
+`GET /api/auth/anonymous/policy` and `GET /api/auth/me` → `capabilities` describe what
+the current user may do. Named capabilities:
+
+| Capability | Default anonymous | Notes |
+|---|---|---|
+| `chat` | allowed | Text chat |
+| `chat_notes` | allowed | Voice/video notes + uploads |
+| `voice_translate` | allowed | Live + record |
+| `history` | allowed | 3-minute rolling buffer |
+| `settings` | allowed | Pause / languages / Whisper model |
+| `transcription` | **denied** | Premium on-demand STT; upgrade first |
+| `talk_coins` | **denied** | Commercial |
+| `checkout` | **denied** | Commercial |
+| `games` | **denied** | M8 placeholder still 501 for verified users |
+| `groups` | **denied** | Future M6 |
+| `nickname` | **denied** | Unique public nick (M15); avoids squatting |
+| `commercial` | **denied** | Licence proxy |
+
+Allowlist: `ANON_CAPABILITIES` (comma-separated; `none` / `all`). Subtract with
+`ANON_DENIED_CAPABILITIES`. Denied calls return **403** `capability_denied`.
+
+Anonymous also gets tighter **rate/quota** caps (verified users keep the existing
+chat/WS numbers):
+
+| Env | Default | vs verified |
+|---|---|---|
+| `ANON_CHAT_MSG_PER_MIN` | 5 | 10 |
+| `ANON_CHAT_UPLOAD_PER_MIN` | 5 | 20 |
+| `ANON_CHAT_QUOTA_BYTES` | 50 MiB | 500 MiB |
+| `ANON_VOICE_TRANSLATE_RECORD_PER_MIN` | 8 | 20 |
+| `ANON_WS_CONNECTS_PER_MIN` | 10 | 20 |
+
+### Upgrade in place (keep this account)
+
+Linking a **verified** sign-in method attaches it to the **current** user id. Chat,
+notes, media, and history stay put. Phone is implemented today
+(`POST /api/auth/phone/link`, or `POST /api/auth/phone/verify` while signed in).
+The same `AuthService.upgrade_with_claim(IdentityClaim)` path is how email, Google,
+Apple, and passkeys will plug in later (`provider` + `subject` + optional encrypted
+email/phone fields).
+
+A signed-in anonymous user who verifies a phone is upgraded, not signed in as a
+new user.
+
+### No silent merge
+
+If that verified method already belongs to a **different** account:
+
+- **409** `{provider}_taken` (phone → `phone_taken`)
+- `merge_required` is **true** only when the caller is still anonymous
+- Response includes a short-lived `merge_token` (`ANON_MERGE_TTL_S`, default 10 min)
+
+Merge does **not** run unless the user posts `POST /api/auth/upgrade/confirm` with
+`{"confirm": true, "merge_token": "..."}`. That moves file-backed chat/media/history
+onto the existing account, deletes the anonymous auth rows, and issues a session
+for the existing user. Verified users who try to link a taken method get 409
+**without** a merge token.
+
+### Recovery-code UX
+
+Decision: **a replacement code is issued after use** (`ANON_RECOVERY_REISSUE=always`,
+the default). The used code stays invalid. Rationale: the recovery code is the only
+secret for an anonymous account; consuming it without a replacement locks the person
+out if they later lose the cookie.
+
+| `ANON_RECOVERY_REISSUE` | Behaviour |
+|---|---|
+| `always` (default) | After a successful recover, the response includes a new `recovery_code` (shown once) |
+| `never` | Single-use, no replacement. `recovery_reissued: false` |
+| `if_anonymous` | Replacement only while the account has no verified method |
+
+Codes are hashed at rest, returned **once**, and never logged. Signed-in users can
+call `POST /api/auth/recovery/rotate` to invalidate unused codes and see a new one.
+
+### Inactivity expiry
+
+Anonymous-**only** accounts (no phone/email/google/apple/passkey identity) expire
+after `ANON_IDLE_SECONDS` (default **30 days**) of no `users.last_seen_at`.
+`last_seen_at` is updated from session use (throttled to once a minute). A background
+loop (`ANON_CLEANUP_INTERVAL_S`, default 1 h; **0 disables**) deletes:
+
+- identities, unused recovery codes, login challenges
+- sessions (revoked)
+- file-backed chat, media, and 3-minute history
+- user row is soft-deleted (`status=deleted`, nickname cleared)
+
+`auth_events` stay (no PII, hashed user id). Accounts that already linked a verified
+method are never expired by this job. `ANON_IDLE_SECONDS=0` disables expiry.
+
+### Anti-abuse (create)
+
+`POST /api/auth/anonymous` is limited per client IP (`ANON_CREATE_PER_IP` /
+`ANON_CREATE_WINDOW_S`, default **5 / hour**, plus `ANON_CREATE_PER_IP_DAY` default
+**20 / day**). IPs are stored hashed on sessions. A signed-in accounts user cannot
+mint another anonymous account (`400 already_signed_in`).
 
 ## Phone (owner add-on)
 
@@ -111,11 +222,12 @@ Flow:
    channel defaults to **`sms`**. E.164 via `phonenumbers` (Apache-2.0). Country
    allowlist `SMS_COUNTRY_ALLOWLIST`. Rate limits: **3 sends / 15 min per
    number**, **10 / hour per IP**, **60 s resend cooldown**.
-2. `POST /api/auth/phone/verify` `{phone, code}` — find or **create** an account (never
-   merge with a different signed-in user).
+2. `POST /api/auth/phone/verify` `{phone, code}` — if **not** signed in: find or **create**
+   an account. If signed in: same as link (in-place upgrade). Never silently merge.
 3. `POST /api/auth/phone/link` `{phone, code}` — attach the number to the **current** user.
    Requires a **fresh** session (issued within 10 minutes). If the number already belongs
-   to someone else → **409 `phone_taken`** (no auto-merge).
+   to someone else → **409 `phone_taken`**. Anonymous callers also get `merge_required`
+   + `merge_token` (explicit confirm only; see above).
 4. Unlink: `DELETE /api/auth/methods/{id}`.
 
 Phones and codes are never logged. Identity `subject` is HMAC, not the number.
@@ -143,4 +255,9 @@ phone: roughly **12–16 days** of implementation once secrets and provider acco
 See `.env.example`: `AUTH_MODE`, `PUBLIC_ORIGIN`, `LOG_SALT`, `DB_ENCRYPTION_KEY`,
 `DATABASE_URL`, `APP_SECRET_KEY`, `SMS_PROVIDER`, `TWILIO_ACCOUNT_SID`,
 `TWILIO_AUTH_TOKEN`, `TWILIO_VERIFY_SERVICE_SID`, `SMS_COUNTRY_ALLOWLIST`,
-`SMS_DEFAULT_REGION`.
+`SMS_DEFAULT_REGION`, `ANON_CAPABILITIES`, `ANON_DENIED_CAPABILITIES`,
+`ANON_CREATE_PER_IP`, `ANON_CREATE_WINDOW_S`, `ANON_CREATE_PER_IP_DAY`,
+`ANON_CHAT_MSG_PER_MIN`, `ANON_CHAT_UPLOAD_PER_MIN`, `ANON_CHAT_QUOTA_BYTES`,
+`ANON_VOICE_TRANSLATE_RECORD_PER_MIN`, `ANON_WS_CONNECTS_PER_MIN`,
+`ANON_RECOVERY_REISSUE`, `ANON_IDLE_SECONDS`, `ANON_CLEANUP_INTERVAL_S`,
+`ANON_CLEANUP_BATCH`, `ANON_MERGE_TTL_S`.

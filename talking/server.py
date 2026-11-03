@@ -14,6 +14,7 @@ from fastapi.staticfiles import StaticFiles
 
 from . import __version__
 from .auth import authenticate_websocket, register_auth
+from .auth.capabilities import deny_anonymous_capability
 from .auth.crypto import WS_TOKEN_TTL_LOCAL_S, WS_TOKEN_TTL_S
 from .auth.deps import require_user
 from .auth.http import validate_auth_settings
@@ -51,10 +52,33 @@ def _html(name: str, settings: Settings) -> HTMLResponse:
 
 @asynccontextmanager
 async def _lifespan(app: FastAPI):
-    yield
-    engine = getattr(app.state, "auth_engine", None)
-    if engine is not None:
-        await engine.dispose()
+    stop = asyncio.Event()
+    task = None
+    settings = getattr(app.state, "settings", None)
+    policy = getattr(app.state, "anon_policy", None)
+    svc = getattr(app.state, "auth", None)
+    interval = int(getattr(policy, "cleanup_interval_s", 0) or 0) if policy else 0
+    mode = (getattr(settings, "auth_mode", "local") or "local").strip().lower() if settings else "local"
+    if svc is not None and interval > 0 and mode == "accounts":
+        from talking.auth.jobs import cleanup_loop
+        from talking.auth.userdata import cleaner_from_app
+        task = asyncio.create_task(
+            cleanup_loop(svc, interval_s=interval, cleaner=cleaner_from_app(app), stop=stop),
+            name="anon-cleanup",
+        )
+    try:
+        yield
+    finally:
+        stop.set()
+        if task is not None:
+            task.cancel()
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):
+                pass
+        engine = getattr(app.state, "auth_engine", None)
+        if engine is not None:
+            await engine.dispose()
 
 
 def create_app(settings: Settings | None = None, engine: Engine | None = None,
@@ -101,6 +125,8 @@ def create_app(settings: Settings | None = None, engine: Engine | None = None,
     app.mount("/static", StaticFiles(directory=STATIC), name="static")
 
     ws_limiter = TokenBucket(s.ws_connects_per_min)
+    anon_ws_limiter = TokenBucket(max(1, s.anon_ws_connects_per_min or s.ws_connects_per_min))
+    app.state.anon_ws_limiter = anon_ws_limiter
     api_limiter = TokenBucket(s.rate_limit_per_min)
     app.state.sdk_limiter = TokenBucket(s.sdk_rate_limit_per_min)
     unfurl_limiter = TokenBucket(s.unfurl_rate_per_min)
@@ -218,6 +244,7 @@ def create_app(settings: Settings | None = None, engine: Engine | None = None,
     @app.post("/api/settings")
     async def post_settings(request: Request):
         _limit(request)
+        deny_anonymous_capability(request, "settings")
         data = await request.json()
         kw = {}
         if "pause_ms" in data:
@@ -246,21 +273,25 @@ def create_app(settings: Settings | None = None, engine: Engine | None = None,
 
     @app.get("/api/history")
     def history(request: Request):
+        deny_anonymous_capability(request, "history")
         uid = require_user(request).id
         return [e.to_dict() for e in eng.history_for(uid).entries()]
 
     @app.get("/api/history.json")
     def history_json(request: Request):
+        deny_anonymous_capability(request, "history")
         uid = require_user(request).id
         return JSONResponse(json.loads(eng.history_for(uid).export_json() or "[]"))
 
     @app.get("/api/history.txt", response_class=PlainTextResponse)
     def history_txt(request: Request):
+        deny_anonymous_capability(request, "history")
         uid = require_user(request).id
         return eng.history_for(uid).export_text()
 
     @app.post("/api/history/clear")
     def history_clear(request: Request):
+        deny_anonymous_capability(request, "history")
         uid = require_user(request).id
         eng.history_for(uid).clear()
         return {"ok": True}
@@ -296,7 +327,8 @@ def create_app(settings: Settings | None = None, engine: Engine | None = None,
 
     # --- Open-core placeholders (future modules) ---
     @app.get("/api/games")
-    def games_placeholder():
+    def games_placeholder(request: Request):
+        deny_anonymous_capability(request, "games")
         return JSONResponse(games_stub(), status_code=501)
 
     # --- Commercial boundary: stubs that proxy over HTTP, never import proprietary code ---
@@ -306,15 +338,18 @@ def create_app(settings: Settings | None = None, engine: Engine | None = None,
 
     @app.get("/api/commercial/license")
     def commercial_license(request: Request):
+        deny_anonymous_capability(request, "commercial")
         uid = require_user(request).id
         return eng.commercial.license_status(uid)
 
     @app.get("/api/commercial/talk-coins")
-    def commercial_coins():
+    def commercial_coins(request: Request):
+        deny_anonymous_capability(request, "talk_coins")
         return eng.commercial.talk_coins_balance()
 
     @app.post("/api/commercial/checkout")
     async def commercial_checkout(request: Request):
+        deny_anonymous_capability(request, "checkout")
         data = await request.json() if request.headers.get("content-type", "").startswith("application/json") else {}
         return eng.commercial.checkout(str(data.get("plan", "premium")))
 
@@ -347,6 +382,10 @@ def create_app(settings: Settings | None = None, engine: Engine | None = None,
         if ctx is None or not ctx.authenticated:
             await ws.close(code=1008, reason="handshake")
             return
+        if ctx.auth_mode == "accounts" and ctx.is_anonymous:
+            if not anon_ws_limiter.allow(ip):
+                await ws.close(code=1008, reason="rate limit")
+                return
         user_id = ctx.id
         await ws.accept()
         app.state.auth_sockets.add(ws, user_id, ctx.session_id)

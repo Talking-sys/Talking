@@ -8,6 +8,7 @@ from fastapi.responses import JSONResponse
 from talking.db import make_engine, make_session_factory
 from talking.security import client_ip, sign
 
+from .capabilities import AnonymousPolicy
 from .crypto import (
     ACCESS_COOKIE,
     ACCESS_COOKIE_DEV,
@@ -26,6 +27,7 @@ from .rate_limit import AuthRateLimiter
 from .service import AuthError, AuthService
 from .sockets import SocketRegistry
 from .storage import MemoryAuthStorage, PostgresAuthStorage
+from .userdata import relocator_from_app
 
 log = logging.getLogger("talking.auth")
 
@@ -94,8 +96,11 @@ def clear_session_cookies(response: Response, request: Request) -> None:
         response.delete_cookie(name, path=path, **kw)
 
 
-def _err(exc: AuthError) -> HTTPException:
-    return HTTPException(exc.status, exc.code)
+def auth_error_response(exc: AuthError) -> JSONResponse:
+    body = {"detail": exc.code}
+    if exc.extra:
+        body.update(exc.extra)
+    return JSONResponse(body, status_code=exc.status)
 
 
 def _log_salt(settings, secret: bytes) -> bytes:
@@ -117,14 +122,15 @@ def build_auth_stack(settings, secret: bytes):
     salt = _log_salt(settings, secret)
     enc = load_encryption_key(settings.db_encryption_key, secret)
     allow_debug = (settings.app_env or "").lower() in ("test", "development", "dev", "local")
+    policy = AnonymousPolicy.from_settings(settings)
     svc = AuthService(
         store, secret=secret, log_salt=salt, enc_key=enc,
         phone_provider=build_phone_provider(settings),
-        sign_fn=sign, allow_debug_otp=allow_debug,
+        sign_fn=sign, allow_debug_otp=allow_debug, policy=policy,
     )
     limiter = AuthRateLimiter(settings.redis_url)
     sockets = SocketRegistry()
-    return store, svc, limiter, sockets, engine
+    return store, svc, limiter, sockets, engine, policy
 
 
 def attach_session_response(request: Request, body: dict, status: int = 200) -> JSONResponse:
@@ -140,24 +146,34 @@ def attach_session_response(request: Request, body: dict, status: int = 200) -> 
 
 def register_auth(app: FastAPI) -> None:
     s = app.state.settings
-    store, svc, limiter, sockets, engine = build_auth_stack(s, app.state.secret)
+    store, svc, limiter, sockets, engine, policy = build_auth_stack(s, app.state.secret)
     app.state.auth_store = store
     app.state.auth = svc
     app.state.auth_limiter = limiter
     app.state.auth_sockets = sockets
     app.state.auth_engine = engine
+    app.state.anon_policy = policy
     install_auth_log_filter(svc.log_salt)
     app.add_middleware(AuthMiddleware)
 
+    @app.get("/api/auth/anonymous/policy")
+    async def anonymous_policy():
+        return policy.catalog()
+
     @app.post("/api/auth/anonymous")
     async def anonymous(request: Request):
+        ctx = getattr(request.state, "user", None)
+        if ctx is not None and ctx.authenticated and ctx.auth_mode == "accounts":
+            raise HTTPException(400, "already_signed_in")
         ip = client_ip(request)
-        if not limiter.allow(f"auth:anon:{ip}", 10, 3600):
+        if not limiter.allow(f"auth:anon:{ip}", policy.create_per_ip, policy.create_window_s):
+            raise HTTPException(429, "rate limit")
+        if not limiter.allow(f"auth:anon-day:{ip}", policy.create_per_ip_day, 86400):
             raise HTTPException(429, "rate limit")
         try:
             out = await svc.create_anonymous(ip=ip, user_agent=request.headers.get("user-agent"))
         except AuthError as e:
-            raise _err(e)
+            return auth_error_response(e)
         return attach_session_response(request, out, 201)
 
     @app.post("/api/auth/recover")
@@ -171,7 +187,7 @@ def register_auth(app: FastAPI) -> None:
                 str(data.get("code") or ""), ip=ip, user_agent=request.headers.get("user-agent"),
             )
         except AuthError as e:
-            raise _err(e)
+            return auth_error_response(e)
         return attach_session_response(request, out)
 
     @app.post("/api/auth/refresh")
@@ -184,7 +200,7 @@ def register_auth(app: FastAPI) -> None:
         except AuthError as e:
             if e.code == "refresh_reuse" and e.user_id:
                 await app.state.auth_sockets.close_user(e.user_id)
-            raise _err(e)
+            return auth_error_response(e)
         user = await svc.store.get_user(sess.user_id)
         body = {"ok": True, "user": svc.public_user(user) if user else None, "session": sess, "refresh": new_raw}
         return attach_session_response(request, body)
@@ -215,6 +231,8 @@ def register_auth(app: FastAPI) -> None:
             return {
                 "id": user.id, "status": "active", "auth_mode": "local",
                 "anonymous": True, "methods": [], "profile_private": True,
+                "capabilities": policy.public_for(False),
+                "idle_expires_at": None,
             }
         rec = user.user or await svc.store.get_user(user.id)
         methods = await svc.public_methods(user.id)
@@ -223,6 +241,14 @@ def register_auth(app: FastAPI) -> None:
         body["auth_mode"] = "accounts"
         body["anonymous"] = user.is_anonymous
         body["session_id"] = user.session_id
+        apply = policy.applies_to(user)
+        body["capabilities"] = policy.public_for(apply)
+        if apply and policy.idle_seconds > 0 and rec is not None:
+            from datetime import timedelta
+            last = rec.last_seen_at or rec.created_at
+            body["idle_expires_at"] = (last + timedelta(seconds=policy.idle_seconds)).isoformat()
+        else:
+            body["idle_expires_at"] = None
         return body
 
     @app.get("/api/auth/sessions")
@@ -244,7 +270,7 @@ def register_auth(app: FastAPI) -> None:
         try:
             sess = await svc.revoke_session(user.id, session_id)
         except AuthError as e:
-            raise _err(e)
+            return auth_error_response(e)
         await app.state.auth_sockets.close_session(sess.id)
         return {"ok": True, "id": session_id}
 
@@ -261,8 +287,40 @@ def register_auth(app: FastAPI) -> None:
         try:
             await svc.unlink_method(user.id, method_id)
         except AuthError as e:
-            raise _err(e)
+            return auth_error_response(e)
         return {"ok": True, "id": method_id}
+
+    @app.post("/api/auth/recovery/rotate")
+    async def rotate_recovery(request: Request):
+        user = require_user(request)
+        if user.auth_mode == "local":
+            raise HTTPException(400, "accounts_only")
+        try:
+            return await svc.rotate_recovery(user.id, ip=client_ip(request))
+        except AuthError as e:
+            return auth_error_response(e)
+
+    @app.post("/api/auth/upgrade/confirm")
+    async def upgrade_confirm(request: Request):
+        user = require_user(request)
+        if user.auth_mode == "local":
+            raise HTTPException(400, "accounts_only")
+        if user.user is None or user.session is None:
+            raise HTTPException(401, "not signed in")
+        data = await _json(request)
+        confirm = data.get("confirm") is True or str(data.get("confirm") or "").strip().lower() in (
+            "1", "true", "yes",
+        )
+        try:
+            out = await svc.confirm_merge(
+                user.user, user.session, str(data.get("merge_token") or ""),
+                confirm=confirm, ip=client_ip(request),
+                relocate=relocator_from_app(app),
+            )
+        except AuthError as e:
+            return auth_error_response(e)
+        await app.state.auth_sockets.close_user(user.id)
+        return attach_session_response(request, out)
 
     @app.post("/api/auth/phone/start")
     async def phone_start(request: Request):
@@ -291,7 +349,7 @@ def register_auth(app: FastAPI) -> None:
                 phone, channel, ip=ip, user_id=(uid.id if uid and uid.authenticated else None),
             )
         except AuthError as e:
-            raise _err(e)
+            return auth_error_response(e)
 
     @app.post("/api/auth/phone/verify")
     async def phone_verify(request: Request):
@@ -303,13 +361,23 @@ def register_auth(app: FastAPI) -> None:
         ip = client_ip(request)
         if not limiter.allow(f"auth:phone:verify:{ip}", 20, 3600):
             raise HTTPException(429, "rate limit")
+        ctx = getattr(request.state, "user", None)
         try:
+            if (
+                ctx is not None and ctx.authenticated and ctx.auth_mode == "accounts"
+                and ctx.user is not None and ctx.session is not None
+            ):
+                out = await svc.link_phone(
+                    ctx.user, ctx.session, phone, str(data.get("code") or ""),
+                    ip=ip,
+                )
+                return out
             out = await svc.verify_phone(
                 phone, str(data.get("code") or ""), ip=ip,
                 user_agent=request.headers.get("user-agent"),
             )
         except AuthError as e:
-            raise _err(e)
+            return auth_error_response(e)
         return attach_session_response(request, out)
 
     @app.post("/api/auth/phone/link")
@@ -327,7 +395,7 @@ def register_auth(app: FastAPI) -> None:
                 user.user, user.session, phone, str(data.get("code") or ""), ip=client_ip(request),
             )
         except AuthError as e:
-            raise _err(e)
+            return auth_error_response(e)
 
 
 async def _json(request: Request) -> dict:

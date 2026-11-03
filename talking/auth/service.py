@@ -3,12 +3,22 @@ from __future__ import annotations
 
 import logging
 from datetime import timedelta
-from typing import Any
+from typing import Any, Callable
 
+from talking.security import unsign
+
+from .capabilities import (
+    AnonymousPolicy,
+    VERIFIED_PROVIDERS,
+    identities_are_anonymous,
+    should_reissue_recovery,
+)
 from .crypto import (
     ACCESS_TTL_S,
     CSRF_TTL_S,
     FRESH_AUTH_S,
+    LAST_SEEN_WRITE_S,
+    MERGE_PURPOSE,
     PHONE_OTP_TTL_S,
     REFRESH_TTL_S,
     encrypt_pii,
@@ -25,6 +35,7 @@ from .providers import PhoneProvider, StartResult
 from .storage import AuthStorage
 from .types import (
     ChallengeRecord,
+    IdentityClaim,
     IdentityRecord,
     RecoveryRecord,
     SessionRecord,
@@ -35,12 +46,20 @@ log = logging.getLogger("talking.auth")
 
 
 class AuthError(Exception):
-    def __init__(self, status: int, code: str, message: str = "", user_id: str | None = None):
+    def __init__(
+        self,
+        status: int,
+        code: str,
+        message: str = "",
+        user_id: str | None = None,
+        extra: dict | None = None,
+    ):
         super().__init__(message or code)
         self.status = status
         self.code = code
         self.message = message or code
         self.user_id = user_id
+        self.extra = extra or {}
 
 
 class AuthService:
@@ -54,6 +73,7 @@ class AuthService:
         phone_provider: PhoneProvider | None = None,
         sign_fn=None,
         allow_debug_otp: bool = False,
+        policy: AnonymousPolicy | None = None,
     ):
         self.store = store
         self.secret = secret
@@ -62,6 +82,7 @@ class AuthService:
         self.phone_provider = phone_provider
         self.sign = sign_fn
         self.allow_debug_otp = allow_debug_otp
+        self.policy = policy or AnonymousPolicy()
 
     def uid_log(self, user_id: str) -> str:
         return user_log_id(self.log_salt, user_id)
@@ -158,30 +179,48 @@ class AuthService:
         user = await self.store.get_user(sess.user_id)
         if user is None or user.status != "active":
             return None
-        sess.last_seen_at = utcnow()
+        now = utcnow()
+        sess.last_seen_at = now
         await self.store.save_session(sess)
+        last = user.last_seen_at or user.created_at
+        if (now - last).total_seconds() >= LAST_SEEN_WRITE_S:
+            user.last_seen_at = now
+            user.updated_at = now
+            await self.store.save_user(user)
         return user, sess
 
     def session_is_fresh(self, sess: SessionRecord) -> bool:
         return (utcnow() - sess.auth_at).total_seconds() <= FRESH_AUTH_S
 
+    async def _issue_recovery_code(self, user_id: str) -> str:
+        await self.store.invalidate_unused_recovery(user_id)
+        code = new_recovery_code()
+        await self.store.create_recovery(RecoveryRecord(
+            id=new_id(), user_id=user_id, code_hash=hash_token(code),
+        ))
+        return code
+
+    async def user_is_anonymous(self, user_id: str) -> bool:
+        methods = await self.store.list_identities(user_id)
+        return identities_are_anonymous(methods)
+
     async def create_anonymous(self, *, ip: str | None = None, user_agent: str | None = None) -> dict:
-        user = UserRecord(id=new_id())
+        now = utcnow()
+        user = UserRecord(id=new_id(), created_at=now, updated_at=now, last_seen_at=now)
         await self.store.create_user(user)
         ident = IdentityRecord(
             id=new_id(), user_id=user.id, provider="anonymous", subject=user.id,
         )
         await self.store.create_identity(ident)
-        code = new_recovery_code()
-        await self.store.create_recovery(RecoveryRecord(
-            id=new_id(), user_id=user.id, code_hash=hash_token(code),
-        ))
+        code = await self._issue_recovery_code(user.id)
         sess, refresh = await self.issue_session(user.id, ip=ip, user_agent=user_agent)
         await self._event("anonymous_create", user_id=user.id, ip=ip)
         log.info("anonymous account user=%s", self.uid_log(user.id))
         return {
             "user": self.public_user(user),
             "recovery_code": code,
+            "recovery_reissue": self.policy.recovery_reissue,
+            "shown_once": True,
             "session": sess,
             "refresh": refresh,
         }
@@ -200,7 +239,27 @@ class AuthService:
         await self.store.save_recovery(rec)
         sess, refresh = await self.issue_session(user.id, ip=ip, user_agent=user_agent)
         await self._event("recover", user_id=user.id, ip=ip)
-        return {"user": self.public_user(user), "session": sess, "refresh": refresh}
+        body = {"user": self.public_user(user), "session": sess, "refresh": refresh}
+        anon = await self.user_is_anonymous(user.id)
+        if should_reissue_recovery(self.policy.recovery_reissue, anon):
+            body["recovery_code"] = await self._issue_recovery_code(user.id)
+            body["recovery_reissued"] = True
+        else:
+            body["recovery_reissued"] = False
+        body["recovery_reissue"] = self.policy.recovery_reissue
+        return body
+
+    async def rotate_recovery(self, user_id: str, *, ip: str | None = None) -> dict:
+        user = await self.store.get_user(user_id)
+        if user is None or user.status != "active":
+            raise AuthError(401, "not signed in")
+        code = await self._issue_recovery_code(user_id)
+        await self._event("recovery_rotate", user_id=user_id, ip=ip)
+        return {
+            "recovery_code": code,
+            "recovery_reissue": self.policy.recovery_reissue,
+            "shown_once": True,
+        }
 
     async def logout(self, session: SessionRecord, *, ip: str | None = None) -> None:
         session.revoked_at = utcnow()
@@ -352,20 +411,128 @@ class AuthService:
         if not self.session_is_fresh(session):
             raise AuthError(403, "fresh_session_required")
         await self._check_phone_code(phone_e164, code)
-        subject = self._subject_phone(phone_e164)
-        existing = await self.store.get_identity("phone", subject)
-        if existing is not None:
-            if existing.user_id == user.id:
-                return {"ok": True, "linked": True, "already": True}
-            # Never auto-merge.
-            raise AuthError(409, "phone_taken")
-        ident = IdentityRecord(
-            id=new_id(), user_id=user.id, provider="phone", subject=subject,
+        claim = IdentityClaim(
+            provider="phone",
+            subject=self._subject_phone(phone_e164),
             phone_enc=encrypt_pii(self.enc_key, phone_e164),
         )
+        return await self.upgrade_with_claim(user, session, claim, ip=ip)
+
+    def _merge_token(self, from_user: str, to_user: str, provider: str, subject: str, session_id: str) -> str:
+        ttl = max(60, int(self.policy.merge_ttl_s or 600))
+        return self.sign(
+            self.secret,
+            {"from": from_user, "to": to_user, "p": provider, "s": subject, "sid": session_id},
+            MERGE_PURPOSE, ttl=ttl,
+        )
+
+    async def upgrade_with_claim(
+        self,
+        user: UserRecord,
+        session: SessionRecord,
+        claim: IdentityClaim,
+        *,
+        ip: str | None = None,
+    ) -> dict:
+        """Attach a verified method to the current user (in-place upgrade).
+
+        Designed for phone now and email/Google/Apple/passkeys later. Never
+        silently merges into a different account: a taken identity returns 409
+        with a short-lived merge_token when the current user is still anonymous.
+        """
+        if not self.session_is_fresh(session):
+            raise AuthError(403, "fresh_session_required")
+        provider = (claim.provider or "").strip().lower()
+        if provider not in VERIFIED_PROVIDERS:
+            raise AuthError(400, "unsupported_provider")
+        existing = await self.store.get_identity(provider, claim.subject)
+        if existing is not None:
+            if existing.user_id == user.id:
+                return {"ok": True, "linked": True, "already": True, "upgraded": False}
+            taken = f"{provider}_taken"
+            extra: dict[str, Any] = {"provider": provider, "merge_required": False}
+            if await self.user_is_anonymous(user.id):
+                extra.update(
+                    merge_required=True,
+                    merge_token=self._merge_token(
+                        user.id, existing.user_id, provider, claim.subject, session.id,
+                    ),
+                    merge_ttl=int(self.policy.merge_ttl_s or 600),
+                    hint=(
+                        "This sign-in method belongs to another account. "
+                        "POST /api/auth/upgrade/confirm with confirm=true and this "
+                        "merge_token to move this anonymous data there, or use a "
+                        "different method to keep this account."
+                    ),
+                )
+            raise AuthError(409, taken, extra=extra)
+        ident = IdentityRecord(
+            id=new_id(), user_id=user.id, provider=provider, subject=claim.subject,
+            email_hash=claim.email_hash, email_enc=claim.email_enc,
+            email_verified=claim.email_verified, phone_enc=claim.phone_enc,
+        )
         await self.store.create_identity(ident)
-        await self._event("phone_link", user_id=user.id, ip=ip)
-        return {"ok": True, "linked": True, "method": {"id": ident.id, "provider": "phone"}}
+        session.auth_at = utcnow()
+        await self.store.save_session(session)
+        await self._event("identity_link", user_id=user.id, ip=ip, provider=provider)
+        methods = await self.public_methods(user.id)
+        return {
+            "ok": True,
+            "linked": True,
+            "already": False,
+            "upgraded": True,
+            "kept_user_id": True,
+            "user": self.public_user(user, methods=methods),
+            "method": {"id": ident.id, "provider": provider},
+        }
+
+    async def confirm_merge(
+        self,
+        user: UserRecord,
+        session: SessionRecord,
+        merge_token: str,
+        *,
+        confirm: bool,
+        ip: str | None = None,
+        relocate: Callable[[str, str], Any] | None = None,
+    ) -> dict:
+        if not confirm:
+            raise AuthError(400, "confirm_required")
+        payload = unsign(self.secret, merge_token or "", MERGE_PURPOSE)
+        if not payload:
+            raise AuthError(400, "invalid_merge_token")
+        if str(payload.get("from") or "") != user.id or str(payload.get("sid") or "") != session.id:
+            raise AuthError(403, "merge_token_mismatch")
+        if not await self.user_is_anonymous(user.id):
+            raise AuthError(400, "not_anonymous")
+        target_id = str(payload.get("to") or "")
+        target = await self.store.get_user(target_id)
+        if target is None or target.status != "active":
+            raise AuthError(409, "target_gone")
+        provider = str(payload.get("p") or "")
+        subject = str(payload.get("s") or "")
+        ident = await self.store.get_identity(provider, subject)
+        if ident is None or ident.user_id != target_id:
+            raise AuthError(409, "merge_stale")
+        copied = {"messages": 0, "media": 0}
+        if relocate is not None:
+            copied = relocate(user.id, target_id) or copied
+        await self.store.purge_user_auth(user.id)
+        await self._event("anonymous_merge", user_id=target_id, ip=ip, provider=provider)
+        sess, refresh = await self.issue_session(target_id, ip=ip, user_agent=session.device_label)
+        return {
+            "ok": True,
+            "merged": True,
+            "from_deleted": True,
+            "copied": copied,
+            "user": self.public_user(target),
+            "session": sess,
+            "refresh": refresh,
+        }
+
+    async def expire_anonymous_user(self, user_id: str) -> None:
+        await self.store.purge_user_auth(user_id)
+        await self._event("anonymous_expire", user_id=user_id)
 
     async def unlink_method(self, user_id: str, ident_id: str) -> None:
         ident = await self.store.get_identity_by_id(ident_id)

@@ -112,6 +112,31 @@ class Settings:
     sms_country_allowlist: str = field(default_factory=lambda: _env("SMS_COUNTRY_ALLOWLIST", ""))
     sms_default_region: str = field(default_factory=lambda: _env("SMS_DEFAULT_REGION", ""))
 
+    # Anonymous accounts (AUTH_MODE=accounts). Comma-separated capability names;
+    # see talking.auth.capabilities.ALL_CAPABILITIES. Empty = product default.
+    anon_capabilities: str = field(
+        default_factory=lambda: _env("ANON_CAPABILITIES", "chat,chat_notes,voice_translate,history,settings")
+    )
+    anon_denied_capabilities: str = field(default_factory=lambda: _env("ANON_DENIED_CAPABILITIES", ""))
+    anon_create_per_ip: int = field(default_factory=lambda: _env_int("ANON_CREATE_PER_IP", 5))
+    anon_create_window_s: int = field(default_factory=lambda: _env_int("ANON_CREATE_WINDOW_S", 3600))
+    anon_create_per_ip_day: int = field(default_factory=lambda: _env_int("ANON_CREATE_PER_IP_DAY", 20))
+    anon_chat_msg_per_min: int = field(default_factory=lambda: _env_int("ANON_CHAT_MSG_PER_MIN", 5))
+    anon_chat_upload_per_min: int = field(default_factory=lambda: _env_int("ANON_CHAT_UPLOAD_PER_MIN", 5))
+    anon_chat_quota_bytes: int = field(default_factory=lambda: _env_int("ANON_CHAT_QUOTA_BYTES", 50 * 1024 * 1024))
+    anon_voice_translate_record_per_min: int = field(
+        default_factory=lambda: _env_int("ANON_VOICE_TRANSLATE_RECORD_PER_MIN", 8)
+    )
+    anon_ws_connects_per_min: int = field(default_factory=lambda: _env_int("ANON_WS_CONNECTS_PER_MIN", 10))
+    # always | never | if_anonymous. Default always: using a recovery code issues a replacement.
+    anon_recovery_reissue: str = field(default_factory=lambda: _env("ANON_RECOVERY_REISSUE", "always"))
+    # 0 disables inactivity expiry. Default 30 days.
+    anon_idle_seconds: int = field(default_factory=lambda: _env_int("ANON_IDLE_SECONDS", 30 * 24 * 3600))
+    # 0 disables the background cleanup loop (tests). Default hourly.
+    anon_cleanup_interval_s: int = field(default_factory=lambda: _env_int("ANON_CLEANUP_INTERVAL_S", 3600))
+    anon_cleanup_batch: int = field(default_factory=lambda: _env_int("ANON_CLEANUP_BATCH", 50))
+    anon_merge_ttl_s: int = field(default_factory=lambda: _env_int("ANON_MERGE_TTL_S", 600))
+
     s3_endpoint: str = field(default_factory=lambda: _env("S3_ENDPOINT", ""))
     s3_bucket: str = field(default_factory=lambda: _env("S3_BUCKET", ""))
     s3_region: str = field(default_factory=lambda: _env("S3_REGION", ""))

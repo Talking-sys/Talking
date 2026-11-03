@@ -12,6 +12,7 @@ ACCOUNTS = {
     "SMS_PROVIDER": "console",
     "DB_ENCRYPTION_KEY": "test-db-encryption-key-not-secret",
     "APP_ENV": "test",
+    "ANON_CLEANUP_INTERVAL_S": "0",
 }
 
 
@@ -150,6 +151,9 @@ def test_anonymous_create_and_recover(make_client):
     rec = c.post("/api/auth/recover", json={"code": code}, headers=_h())
     assert rec.status_code == 200, rec.text
     assert rec.json()["user"]["id"] == uid
+    assert rec.json().get("recovery_reissued") is True
+    new_code = rec.json()["recovery_code"]
+    assert new_code and new_code != code
     again = c.post("/api/auth/recover", json={"code": code}, headers=_h(rec.json()["csrf_token"]))
     assert again.status_code == 401
 

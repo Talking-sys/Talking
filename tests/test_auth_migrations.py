@@ -59,6 +59,11 @@ def test_migrations_up_down():
                 "SELECT obj_description('auth_events'::regclass)"
             )
             assert comment and "90" in comment
+            cols = await conn.fetch(
+                "SELECT column_name FROM information_schema.columns "
+                "WHERE table_name='users'"
+            )
+            assert "last_seen_at" in {r["column_name"] for r in cols}
         finally:
             await conn.close()
 

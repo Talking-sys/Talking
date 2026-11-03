@@ -28,6 +28,7 @@ class User(Base):
     profile_private: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, nullable=False)
+    last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, nullable=False)
 
     identities: Mapped[list[Identity]] = relationship(back_populates="user")
     sessions: Mapped[list[Session]] = relationship(back_populates="user")
