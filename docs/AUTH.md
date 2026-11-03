@@ -1,8 +1,8 @@
-# Auth (M10 stages 0–1 + phone)
+# Auth (M10 stages 0–1 + phone + passkeys)
 
 Copyright (C) 2026 hateaboutyouone. Contact: hateaboutyou111@icloud.com.
 
-This document describes **what shipped** in the first auth PR and **what is left**.
+This document describes **what shipped** in the first auth PRs and **what is left**.
 Google OAuth still requests only `openid email profile` — see `docs/GOOGLE_SCOPES.md`.
 Commercial entitlements stay behind `COMMERCIAL_API_URL` and are keyed by opaque user UUIDs.
 
@@ -17,7 +17,7 @@ production path).
 | `AUTH_MODE` | When | Behaviour |
 |---|---|---|
 | `local` (default in development and tests) | Home Wi-Fi translator, pytest, Playwright | Single user id (`USER_ID` or `local`). No cookies required. Existing chat/WS tests stay green. |
-| `accounts` | Hosted multi-user | Cookie sessions, CSRF, anonymous + phone. Missing WS cookies/tokens close the socket. |
+| `accounts` | Hosted multi-user | Cookie sessions, CSRF, anonymous + phone + passkeys. Missing WS cookies/tokens close the socket. |
 
 `AUTH_MODE=local` is **refused** when `APP_ENV=production`. Production also requires
 `APP_SECRET_KEY` (≥32 chars) and `LOG_SALT`. Production `accounts` requires `DATABASE_URL`.
@@ -30,18 +30,21 @@ unset, which defaults to console) is **refused** in production.
 - SQLAlchemy 2 (async, asyncpg) + Alembic.
 - Initial migration `001_auth_foundation`: `users`, `identities`, `sessions`,
   `recovery_codes`, `auth_events` (no PII, **90-day retention** comment),
-  `login_challenges` (phone OTP / future email codes).
+  `login_challenges` (phone OTP / WebAuthn challenges / future email codes).
+- Migration `002_webauthn_credentials`: passkey public keys, sign counts, clone flag.
+  No attestation blobs. Credential ids are HMAC'd in `identities.subject`.
 - `users.status` is `active | deleting | deleted`. Nickname unique and nullable.
   `profile_private` defaults true. User ids are UUIDs.
-- `identities` unique (`provider`, `subject`). Providers in this PR: `anonymous`, `phone`.
+- `identities` unique (`provider`, `subject`). Providers here: `anonymous`, `phone`, `passkey`.
   Email columns exist for later stages. Phone subject is `HMAC(phone)`; `phone_enc` is
   AES-GCM with `DB_ENCRYPTION_KEY` (hash-only if the key is missing).
 - Storage interface: in-memory (`AUTH_MODE=local` and tests) and Postgres (`AUTH_MODE=accounts`
   with `DATABASE_URL`).
 - CI runs Postgres and an Alembic upgrade / downgrade / upgrade test (`TEST_DATABASE_URL`).
 
-Passkeys, email `login_tokens`, OAuth states, and WebAuthn challenges are **not**
-implemented here (stubs only via unused identity providers).
+Email `login_tokens` and OAuth states are **not** implemented here. Passkeys use
+`login_challenges` (`kind` `webauthn_register` / `webauthn_auth`, **2 min TTL**)
+plus `webauthn_credentials`.
 
 ## Stage 1 — sessions and server-side identity
 
@@ -62,7 +65,7 @@ Endpoints:
 - `POST /api/auth/refresh`
 - `POST /api/auth/logout` / `POST /api/auth/logout-all`
 - `GET /api/auth/me` / `GET /api/auth/sessions` / `DELETE /api/auth/sessions/{id}`
-- `GET /api/auth/methods` / `DELETE /api/auth/methods/{id}` — unlink a sign-in method (not the last one)
+- `GET /api/auth/methods` / `DELETE /api/auth/methods/{id}` — unlink a sign-in method (not the last one; passkeys included)
 
 CSRF: `SameSite=Lax` + `Origin` / `Sec-Fetch-Site` + `X-CSRF-Token` on POST/PATCH/DELETE
 when a session cookie is present. CORS with credentials only for an explicit allowlist
@@ -120,13 +123,42 @@ Flow:
 
 Phones and codes are never logged. Identity `subject` is HMAC, not the number.
 
+## Passkeys / WebAuthn (stage 4)
+
+Library: [`webauthn`](https://pypi.org/project/webauthn/) (py_webauthn, **BSD-3-Clause**).
+Attestation conveyance is `none` (no device certificates stored). Resident keys are
+**preferred** so platform passkeys can sign in without a username.
+
+RP ID and origin come from `PUBLIC_ORIGIN` (hostname = RP ID; scheme+host[+port] =
+expected origin). If `PUBLIC_ORIGIN` is empty, the request `Origin` is used. HTTP is
+refused except `localhost` / `127.0.0.1` / `testserver`.
+
+Challenges live in `login_challenges` (**2 minute TTL**, hashed, single-use on success).
+The raw challenge is a nonce (base64url in `provider_ref`); it is not a secret.
+
+| Endpoint | Who | Notes |
+|---|---|---|
+| `POST /api/auth/passkey/register/options` | signed-in, **fresh** session (10 min, same as phone link) | exclude existing credentials |
+| `POST /api/auth/passkey/register` | signed-in, fresh session + CSRF | adds a `passkey` method |
+| `POST /api/auth/passkey/authenticate/options` | public | discoverable credentials (`allowCredentials` empty) |
+| `POST /api/auth/passkey/authenticate` | public | sets session cookies |
+
+Sign-count clone detection: if the assertion counter is not greater than the stored
+counter (when either is non-zero), the credential is marked `cloned_at` and further
+sign-in is refused (`401 cloned_credential`). Remove it via
+`DELETE /api/auth/methods/{id}` after adding another method — the last sign-in method
+cannot be removed.
+
+Minimal UI: account card on `/` (`talking/static/auth.js`). Cookies only; nothing in
+`localStorage`. `AUTH_MODE=local` returns `400 accounts_only`.
+
 ## Left for later stages (2–7)
 
 | Stage | Scope |
 |---|---|
 | 2 | Email magic link / one-time code (10 min, hashed). Reuse `login_challenges`. |
 | 3 | Google OAuth (`openid email profile` only). No auto-merge on email. |
-| 4 | Passkeys / WebAuthn. |
+| 4 | Passkeys / WebAuthn — **done** (this document). |
 | 5 | Sign in with Apple, equal prominence, private relay. |
 | 6 | Onboarding screens (Google / Apple / email / passkey / phone / anonymous). |
 | 7 | Account deletion, export, audit log UI; 90-day `auth_events` purge job. |
@@ -134,9 +166,11 @@ Phones and codes are never logged. Identity `subject` is HMAC, not the number.
 ## Effort (implementation, not calendar)
 
 Stages 0–1 were scoped at about **2–3 focused days**. Phone is about **+1–1.5 days**
-(provider abstraction, E.164, abuse controls, link/no-merge). Remaining stages 2–7 are
-about **9–12 days** depending on Apple/Google console setup. Whole M10 plan including
-phone: roughly **12–16 days** of implementation once secrets and provider accounts exist.
+(provider abstraction, E.164, abuse controls, link/no-merge). Passkeys are about
+**+1 day** (ceremonies, credential table, clone detection, static UI). Remaining
+stages 2, 3, 5–7 are about **8–11 days** depending on Apple/Google console setup.
+Whole M10 plan including phone and passkeys: roughly **12–16 days** of implementation
+once secrets and provider accounts exist.
 
 ## Env (placeholders only — never commit real values)
 

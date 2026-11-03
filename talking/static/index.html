@@ -23,6 +23,19 @@
   </header>
 
   <main>
+    <section class="card auth-panel" id="authPanel">
+      <h2>Аккаунт</h2>
+      <p class="hint" id="authStatus">Сессия не обязательна для переводчика на домашней сети.</p>
+      <div class="auth-actions">
+        <button type="button" id="authAnon">Анонимный аккаунт</button>
+        <button type="button" id="authPasskeyIn">Войти с passkey</button>
+        <button type="button" id="authPasskeyAdd" hidden>Добавить passkey</button>
+        <button type="button" id="authLogout" hidden>Выйти</button>
+      </div>
+      <ul id="authMethods" class="auth-methods" hidden></ul>
+      <p id="authMsg" class="hint" role="status"></p>
+    </section>
+
     <section class="card controls">
       <label class="field">
         <span>Перевод на</span>
@@ -96,6 +109,7 @@
     <a href="/privacy">Privacy</a> · <a href="/terms">Terms</a> · v{{VERSION}} · {{CONTACT}}
   </footer>
   <script src="/static/vad.js"></script>
+  <script src="/static/auth.js"></script>
   <script src="/static/app.js"></script>
   <script src="/static/chat-edit.js"></script>
   <script src="/static/link-preview.js"></script>

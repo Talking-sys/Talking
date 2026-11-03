@@ -28,4 +28,5 @@ asyncpg>=0.29           # Apache-2.0, Postgres/Neon ping and auth schema
 sqlalchemy[asyncio]>=2.0.30  # MIT
 alembic>=1.13           # MIT
 phonenumbers>=8.13      # Apache-2.0, E.164 phone normalization
+webauthn>=2.2           # BSD-3-Clause, WebAuthn/passkeys (py_webauthn)
 Pillow>=10              # HPND, re-encode + strip EXIF on link-preview images

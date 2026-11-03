@@ -81,13 +81,13 @@ talking/                 GPL open core package
   stt.py / translate.py / tts.py / vad.py
   buffer.py / offline_queue.py / archive.py
   commands.py / languages.py
-  auth/                  sessions, cookies, anonymous + phone (M10 stages 0–1)
+  auth/                  sessions, cookies, anonymous + phone + passkeys (M10)
   commercial/            HTTP client + stubs (no proprietary code)
   chat/                  unified store (notes + text + edits + on-demand premium STT); M4 extends this
   voice_translate/       press-and-hold live WS + record HTTP (reuses STT/translator)
   unfurl/                SSRF-safe Open Graph / Twitter / oEmbed unfurl + image proxy
   games/                 placeholder (M8)
-  static/                mobile-first HTML/JS (+ chat.html, link-preview.js / mini-browser)
+  static/                mobile-first HTML/JS (+ chat.html, auth.js passkeys, link-preview.js / mini-browser)
 sdk/                     intended MIT client (PENDING owner confirmation)
   python/  js/  bindings/  examples/  LICENSE  NOTICE.md
 docs/sdk/                game SDK guide (EN + RU), plan, OpenAPI

@@ -10,6 +10,7 @@ from .crypto import new_id, utcnow
 from .types import (
     AuthEventRecord,
     ChallengeRecord,
+    CredentialRecord,
     IdentityRecord,
     RecoveryRecord,
     SessionRecord,
@@ -40,6 +41,12 @@ class AuthStorage(Protocol):
     async def get_challenge(self, challenge_id: str) -> ChallengeRecord | None: ...
     async def latest_challenge(self, subject_hash: str, kind: str) -> ChallengeRecord | None: ...
     async def save_challenge(self, ch: ChallengeRecord) -> ChallengeRecord: ...
+    async def create_credential(self, cred: CredentialRecord) -> CredentialRecord: ...
+    async def get_credential_by_credential_id(self, credential_id: bytes) -> CredentialRecord | None: ...
+    async def get_credential_by_identity_id(self, identity_id: str) -> CredentialRecord | None: ...
+    async def list_credentials(self, user_id: str) -> list[CredentialRecord]: ...
+    async def save_credential(self, cred: CredentialRecord) -> CredentialRecord: ...
+    async def delete_credential_by_identity(self, identity_id: str) -> bool: ...
     async def aclose(self) -> None: ...
 
 
@@ -54,6 +61,7 @@ class MemoryAuthStorage:
         self.recovery: dict[str, RecoveryRecord] = {}
         self.events: list[AuthEventRecord] = []
         self.challenges: dict[str, ChallengeRecord] = {}
+        self.credentials: dict[str, CredentialRecord] = {}
 
     async def create_user(self, user: UserRecord) -> UserRecord:
         with self._lock:
@@ -85,6 +93,9 @@ class MemoryAuthStorage:
 
     async def delete_identity(self, ident_id: str) -> bool:
         with self._lock:
+            for cid, cred in list(self.credentials.items()):
+                if cred.identity_id == ident_id:
+                    self.credentials.pop(cid, None)
             return self.identities.pop(ident_id, None) is not None
 
     async def create_session(self, sess: SessionRecord) -> SessionRecord:
@@ -171,6 +182,42 @@ class MemoryAuthStorage:
             self.challenges[ch.id] = ch
         return ch
 
+    async def create_credential(self, cred: CredentialRecord) -> CredentialRecord:
+        with self._lock:
+            for existing in self.credentials.values():
+                if existing.credential_id == cred.credential_id:
+                    raise ValueError("credential exists")
+            self.credentials[cred.id] = cred
+        return cred
+
+    async def get_credential_by_credential_id(self, credential_id: bytes) -> CredentialRecord | None:
+        for cred in self.credentials.values():
+            if cred.credential_id == credential_id:
+                return cred
+        return None
+
+    async def get_credential_by_identity_id(self, identity_id: str) -> CredentialRecord | None:
+        for cred in self.credentials.values():
+            if cred.identity_id == identity_id:
+                return cred
+        return None
+
+    async def list_credentials(self, user_id: str) -> list[CredentialRecord]:
+        return [c for c in self.credentials.values() if c.user_id == user_id]
+
+    async def save_credential(self, cred: CredentialRecord) -> CredentialRecord:
+        with self._lock:
+            self.credentials[cred.id] = cred
+        return cred
+
+    async def delete_credential_by_identity(self, identity_id: str) -> bool:
+        with self._lock:
+            for cid, cred in list(self.credentials.items()):
+                if cred.identity_id == identity_id:
+                    self.credentials.pop(cid, None)
+                    return True
+        return False
+
     async def aclose(self) -> None:
         return None
 
@@ -209,6 +256,7 @@ class PostgresAuthStorage:
             return _user_rec(row) if row else None
 
     async def create_identity(self, ident: IdentityRecord) -> IdentityRecord:
+        from sqlalchemy.exc import IntegrityError
         from .models import Identity
         async with self._sf() as db:
             row = Identity(
@@ -218,7 +266,11 @@ class PostgresAuthStorage:
                 created_at=ident.created_at,
             )
             db.add(row)
-            await db.commit()
+            try:
+                await db.commit()
+            except IntegrityError as exc:
+                await db.rollback()
+                raise ValueError("identity exists") from exc
         return ident
 
     async def get_identity(self, provider: str, subject: str) -> IdentityRecord | None:
@@ -412,6 +464,78 @@ class PostgresAuthStorage:
             await db.commit()
         return ch
 
+    async def create_credential(self, cred: CredentialRecord) -> CredentialRecord:
+        from sqlalchemy.exc import IntegrityError
+        from .models import WebAuthnCredential
+        async with self._sf() as db:
+            db.add(_cred_model(cred))
+            try:
+                await db.commit()
+            except IntegrityError as exc:
+                await db.rollback()
+                raise ValueError("credential exists") from exc
+        return cred
+
+    async def get_credential_by_credential_id(self, credential_id: bytes) -> CredentialRecord | None:
+        from sqlalchemy import select
+        from .models import WebAuthnCredential
+        async with self._sf() as db:
+            q = await db.execute(
+                select(WebAuthnCredential).where(WebAuthnCredential.credential_id == credential_id)
+            )
+            row = q.scalar_one_or_none()
+            return _cred_rec(row) if row else None
+
+    async def get_credential_by_identity_id(self, identity_id: str) -> CredentialRecord | None:
+        from sqlalchemy import select
+        from .models import WebAuthnCredential
+        async with self._sf() as db:
+            q = await db.execute(
+                select(WebAuthnCredential).where(WebAuthnCredential.identity_id == _uuid(identity_id))
+            )
+            row = q.scalar_one_or_none()
+            return _cred_rec(row) if row else None
+
+    async def list_credentials(self, user_id: str) -> list[CredentialRecord]:
+        from sqlalchemy import select
+        from .models import WebAuthnCredential
+        async with self._sf() as db:
+            q = await db.execute(
+                select(WebAuthnCredential).where(WebAuthnCredential.user_id == _uuid(user_id))
+            )
+            return [_cred_rec(r) for r in q.scalars().all()]
+
+    async def save_credential(self, cred: CredentialRecord) -> CredentialRecord:
+        from .models import WebAuthnCredential
+        async with self._sf() as db:
+            row = await db.get(WebAuthnCredential, _uuid(cred.id))
+            if row is None:
+                db.add(_cred_model(cred))
+            else:
+                row.sign_count = cred.sign_count
+                row.transports = cred.transports
+                row.backup_eligible = cred.backup_eligible
+                row.backup_state = cred.backup_state
+                row.device_label = cred.device_label
+                row.cloned_at = cred.cloned_at
+                row.last_used_at = cred.last_used_at
+            await db.commit()
+        return cred
+
+    async def delete_credential_by_identity(self, identity_id: str) -> bool:
+        from sqlalchemy import select
+        from .models import WebAuthnCredential
+        async with self._sf() as db:
+            q = await db.execute(
+                select(WebAuthnCredential).where(WebAuthnCredential.identity_id == _uuid(identity_id))
+            )
+            row = q.scalar_one_or_none()
+            if row is None:
+                return False
+            await db.delete(row)
+            await db.commit()
+            return True
+
     async def aclose(self) -> None:
         return None
 
@@ -472,4 +596,37 @@ def _chal_model(ch: ChallengeRecord):
         attempts=ch.attempts, max_attempts=ch.max_attempts, created_at=ch.created_at,
         expires_at=ch.expires_at, consumed_at=ch.consumed_at, ip_hash=ch.ip_hash,
         user_id=_uuid(ch.user_id) if ch.user_id else None,
+    )
+
+
+def _blob(val) -> bytes:
+    if val is None:
+        return b""
+    return bytes(val)
+
+
+def _cred_rec(row) -> CredentialRecord:
+    transports = row.transports
+    if transports is not None and not isinstance(transports, list):
+        transports = None
+    return CredentialRecord(
+        id=str(row.id), user_id=str(row.user_id), identity_id=str(row.identity_id),
+        credential_id=_blob(row.credential_id), public_key=_blob(row.public_key),
+        sign_count=int(row.sign_count or 0), transports=transports, aaguid=row.aaguid,
+        backup_eligible=bool(row.backup_eligible), backup_state=bool(row.backup_state),
+        device_label=row.device_label,
+        cloned_at=_dt(row.cloned_at) if row.cloned_at else None,
+        created_at=_dt(row.created_at),
+        last_used_at=_dt(row.last_used_at) if row.last_used_at else None,
+    )
+
+
+def _cred_model(cred: CredentialRecord):
+    from .models import WebAuthnCredential
+    return WebAuthnCredential(
+        id=_uuid(cred.id), user_id=_uuid(cred.user_id), identity_id=_uuid(cred.identity_id),
+        credential_id=cred.credential_id, public_key=cred.public_key, sign_count=cred.sign_count,
+        transports=cred.transports, aaguid=cred.aaguid, backup_eligible=cred.backup_eligible,
+        backup_state=cred.backup_state, device_label=cred.device_label, cloned_at=cred.cloned_at,
+        created_at=cred.created_at, last_used_at=cred.last_used_at,
     )
