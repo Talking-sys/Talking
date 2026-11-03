@@ -95,3 +95,4 @@ class ChallengeRecord:
     consumed_at: datetime | None = None
     ip_hash: str | None = None
     user_id: str | None = None
+    target_enc: str | None = None
