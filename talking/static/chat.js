@@ -4,9 +4,55 @@
   const MAX_MS = 60000;
   const SIZE = 480;
 
+  const I18N = {
+    ru: {
+      targetLang: "Язык перевода заметок",
+      empty: "Короткое нажатие справа переключает голос и кружочек. Удерживайте, чтобы записать; влево — отмена; вверх — замок.",
+      transcribe: "Расшифровать",
+      transcribeShort: "→А",
+      transcribing: "Расшифровка…",
+      copy: "Копировать",
+      copied: "Скопировано",
+      showOrig: "Показать оригинал",
+      hideOrig: "Скрыть оригинал",
+      premiumHint: "Расшифровка голосовых — функция Talking Premium.",
+      teaser: "Полный текст доступен в Premium.",
+      failed: "Не удалось расшифровать",
+      voice: "голос",
+      circle: "кружочек",
+      text: "текст",
+      ariaVoice: "Голосовая заметка",
+      ariaCircle: "Кружочек",
+      ariaTranscribe: "Расшифровать голосовую заметку",
+      ariaLocked: "Расшифровка недоступна без Premium",
+    },
+    en: {
+      targetLang: "Note translation language",
+      empty: "Short tap on the right toggles voice and round video. Hold to record; slide left to cancel; slide up to lock.",
+      transcribe: "Transcribe",
+      transcribeShort: "→A",
+      transcribing: "Transcribing…",
+      copy: "Copy",
+      copied: "Copied",
+      showOrig: "Show original",
+      hideOrig: "Hide original",
+      premiumHint: "Voice transcription is a Talking Premium feature.",
+      teaser: "Full text is available with Premium.",
+      failed: "Could not transcribe",
+      voice: "voice",
+      circle: "round video",
+      text: "text",
+      ariaVoice: "Voice note",
+      ariaCircle: "Round video note",
+      ariaTranscribe: "Transcribe voice note",
+      ariaLocked: "Transcription requires Premium",
+    },
+  };
+
   const state = {
     dialogId: "local",
     target: localStorage.getItem("target_lang") || "en",
+    uiLang: localStorage.getItem("ui_lang") || "ru",
     token: "",
     ws: null,
     fsm: new TalkingGestures.RecordGestureMachine(),
@@ -24,7 +70,30 @@
     cropTimer: 0,
     drawTimer: 0,
     autoplay: true,
+    entitled: false,
+    freeMode: "lock",
+    pollers: {},
   };
+
+  function t(key) {
+    const pack = I18N[state.uiLang] || I18N.ru;
+    return pack[key] || I18N.ru[key] || key;
+  }
+
+  function applyUiLang() {
+    const lang = state.uiLang === "en" ? "en" : "ru";
+    document.documentElement.lang = lang;
+    const ru = $("uiLangRu");
+    const en = $("uiLangEn");
+    if (ru) ru.setAttribute("aria-pressed", lang === "ru" ? "true" : "false");
+    if (en) en.setAttribute("aria-pressed", lang === "en" ? "true" : "false");
+    document.querySelectorAll("[data-i18n]").forEach((el) => {
+      const key = el.getAttribute("data-i18n");
+      if (key && I18N.ru[key]) el.textContent = t(key);
+    });
+    const sel = $("target");
+    if (sel) sel.setAttribute("aria-label", t("targetLang"));
+  }
 
   function toast(text) {
     const el = $("toast");
@@ -376,6 +445,164 @@
     }
   }, { threshold: [0, 0.45, 1] });
 
+  function isNote(msg) {
+    return msg && (msg.type === "voice_note" || msg.type === "video_note");
+  }
+
+  function isDone(status) {
+    return status === "done" || status === "ok";
+  }
+
+  function isPending(status) {
+    return status === "pending";
+  }
+
+  function isFailed(status) {
+    return status === "failed" || status === "error" || status === "skipped";
+  }
+
+  function escapeAttr(s) {
+    return String(s || "").replace(/[&<>"']/g, (c) => ({
+      "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
+    }[c]));
+  }
+
+  function bindTranscribe(row, msg) {
+    const btn = row.querySelector(".transcribe-btn");
+    if (!btn) return;
+    btn.addEventListener("click", (ev) => {
+      ev.preventDefault();
+      ev.stopPropagation();
+      if (!state.entitled) {
+        toast(t("premiumHint"));
+        return;
+      }
+      requestTranscribe(msg.id);
+    });
+    const copy = row.querySelector(".copy-transcript");
+    if (copy) {
+      copy.addEventListener("click", async () => {
+        const text = msg.translation || msg.transcript || "";
+        try {
+          await navigator.clipboard.writeText(text);
+          copy.textContent = t("copied");
+          setTimeout(() => { copy.textContent = t("copy"); }, 1600);
+        } catch (_) {
+          toast(t("copy"));
+        }
+      });
+    }
+    const show = row.querySelector(".show-orig");
+    if (show) {
+      show.addEventListener("click", () => {
+        const p = row.querySelector(".orig-wrap");
+        const on = p.hidden;
+        p.hidden = !on;
+        show.textContent = on ? t("hideOrig") : t("showOrig");
+      });
+    }
+  }
+
+  async function requestTranscribe(id) {
+    try {
+      const r = await fetch("/api/chat/messages/" + encodeURIComponent(id) + "/transcribe", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ target_lang: state.target }),
+      });
+      const body = await r.json().catch(() => ({}));
+      if (r.status === 403) {
+        toast((body.detail && body.detail.hint && body.detail.hint[state.uiLang]) || t("premiumHint"));
+        state.entitled = false;
+        return;
+      }
+      if (!r.ok) {
+        toast(typeof body.detail === "string" ? body.detail : (t("failed") + " " + r.status));
+        return;
+      }
+      if (body.message) upsertMessage(body.message);
+      else if (body.status) {
+        const row = document.getElementById("m-" + id);
+        if (row && row._msg) upsertMessage(Object.assign({}, row._msg, {
+          transcript_status: body.status,
+          transcript: body.transcript,
+          translation: body.translation,
+          src_lang: body.language,
+          transcript_reason: body.reason,
+        }));
+      }
+      if (body.status === "pending") pollTranscript(id);
+    } catch (e) {
+      toast("Сеть: " + e.message);
+    }
+  }
+
+  function pollTranscript(id) {
+    if (state.pollers[id]) return;
+    let n = 0;
+    const tick = async () => {
+      n += 1;
+      try {
+        const r = await fetch("/api/chat/messages/" + encodeURIComponent(id) + "/transcript");
+        const body = await r.json().catch(() => ({}));
+        if (body.message) upsertMessage(body.message);
+        if (body.status && body.status !== "pending") {
+          clearInterval(state.pollers[id]);
+          delete state.pollers[id];
+          return;
+        }
+      } catch (_) { /* ignore */ }
+      if (n > 80) {
+        clearInterval(state.pollers[id]);
+        delete state.pollers[id];
+      }
+    };
+    state.pollers[id] = setInterval(tick, 400);
+    tick();
+  }
+
+  function noteToolsHtml(msg) {
+    if (!isNote(msg)) return "";
+    const status = msg.transcript_status;
+    const done = isDone(status) && msg.transcript;
+    const pending = isPending(status);
+    const failed = isFailed(status);
+    const hideBtn = !state.entitled && state.freeMode === "hidden";
+    let tools = "";
+    if (!hideBtn && !done) {
+      const locked = !state.entitled;
+      const cls = "transcribe-btn" + (locked ? " is-locked" : "") + (pending ? " is-loading" : "");
+      const label = pending ? t("transcribing") : t("transcribe");
+      const aria = locked ? t("ariaLocked") : t("ariaTranscribe");
+      tools += '<div class="note-tools"><button type="button" class="' + cls + '" aria-label="' +
+        escapeAttr(aria) + '" aria-busy="' + (pending ? "true" : "false") + '"' +
+        (locked ? ' aria-disabled="true"' : "") + ">" +
+        '<span class="glyph" aria-hidden="true">' + t("transcribeShort") + "</span>" +
+        '<span class="label">' + escapeAttr(label) + "</span></button></div>";
+    }
+    if (!state.entitled && state.freeMode === "teaser" && !done) {
+      tools += '<p class="upsell-hint">' + escapeAttr(t("teaser")) + "</p>";
+    }
+    if (pending) {
+      tools += '<p class="transcript-status" aria-live="polite">' + escapeAttr(t("transcribing")) + "</p>";
+    }
+    if (failed && msg.transcript_reason) {
+      tools += '<p class="transcript-status">' + escapeAttr(t("failed") + " — " + msg.transcript_reason) + "</p>";
+    }
+    const hasTr = !!(msg.translation && msg.transcript && msg.translation !== msg.transcript);
+    if (done) {
+      tools += '<div class="transcript-panel">' +
+        (msg.translation ? '<p class="translation"></p>' : "") +
+        (hasTr ? '<p class="transcript orig-wrap" hidden></p>' : '<p class="transcript-body"></p>') +
+        (!hasTr && !msg.translation ? "" : "") +
+        '<div class="transcript-actions">' +
+        '<button type="button" class="copy-transcript">' + escapeAttr(t("copy")) + "</button>" +
+        (hasTr ? '<button type="button" class="show-orig">' + escapeAttr(t("showOrig")) + "</button>" : "") +
+        "</div></div>";
+    }
+    return tools;
+  }
+
   function upsertMessage(msg) {
     if (!msg || !msg.id) return;
     $("empty").hidden = true;
@@ -386,49 +613,34 @@
       row.className = "msg";
       $("feed").appendChild(row);
     }
+    row._msg = msg;
     const clock = new Date((msg.created_at || 0) * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
     const dur = fmtDur(msg.duration_ms || 0);
     let media = "";
     if (msg.type === "video_note") {
-      media = '<button type="button" class="circle-note" aria-label="Кружочек, ' + dur + '">' +
-        '<video playsinline loop preload="metadata" src="' + (msg.play_url || "") + '"></video>' +
+      media = '<button type="button" class="circle-note" aria-label="' + escapeAttr(t("ariaCircle") + ", " + dur) + '">' +
+        '<video playsinline loop preload="metadata" src="' + escapeAttr(msg.play_url || "") + '"></video>' +
         '<svg class="ring" viewBox="0 0 120 120" aria-hidden="true"><circle class="ring-bg" cx="60" cy="60" r="54"></circle>' +
         '<circle class="ring-fg" cx="60" cy="60" r="54"></circle></svg>' +
         '<span class="play-glyph">▶</span><span class="dur">' + dur + "</span></button>";
     } else if (msg.type === "voice_note") {
-      media = '<button type="button" class="wave-note" aria-label="Голосовая заметка, ' + dur + '">' +
+      media = '<button type="button" class="wave-note" aria-label="' + escapeAttr(t("ariaVoice") + ", " + dur) + '">' +
         '<canvas width="180" height="40"></canvas><span class="dur">' + dur + "</span></button>";
     } else {
       media = '<div class="body"></div>';
     }
+    const kindLabel = msg.type === "video_note" ? t("circle") : msg.type === "voice_note" ? t("voice") : t("text");
     const hasTr = !!(msg.translation && msg.transcript && msg.translation !== msg.transcript);
-    const skipped = msg.transcript_status && msg.transcript_status !== "ok"
-      ? '<p class="transcript">Расшифровка не приложена' +
-        (msg.transcript_reason ? " — " + msg.transcript_reason : "") + "</p>"
-      : "";
-    row.innerHTML = '<div class="meta"><span>' + clock + "</span><span>" +
-      (msg.type === "video_note" ? "кружочек" : msg.type === "voice_note" ? "голос" : "текст") +
-      "</span></div>" + media +
-      (msg.translation ? '<p class="translation"></p>' : "") +
-      (hasTr ? '<button type="button" class="show-orig">Показать оригинал</button><p class="transcript orig-wrap" hidden></p>' : "") +
-      (!hasTr && msg.transcript ? '<p class="transcript"></p>' : "") +
-      skipped;
+    row.innerHTML = '<div class="meta"><span>' + clock + "</span><span>" + kindLabel +
+      "</span></div>" + media + noteToolsHtml(msg);
     if (msg.type === "text") row.querySelector(".body").textContent = msg.translation || msg.text || "";
     const trEl = row.querySelector(".translation");
     if (trEl && msg.translation) trEl.textContent = msg.translation;
     const orig = row.querySelector(".orig-wrap");
     if (orig && msg.transcript) orig.textContent = msg.transcript;
-    const onlyT = row.querySelector("p.transcript:not(.orig-wrap)");
-    if (onlyT && msg.transcript && !hasTr) onlyT.textContent = msg.transcript;
-    const show = row.querySelector(".show-orig");
-    if (show) {
-      show.addEventListener("click", () => {
-        const p = row.querySelector(".orig-wrap");
-        const on = p.hidden;
-        p.hidden = !on;
-        show.textContent = on ? "Скрыть оригинал" : "Показать оригинал";
-      });
-    }
+    const bodyEl = row.querySelector(".transcript-body");
+    if (bodyEl && msg.transcript && !hasTr) bodyEl.textContent = msg.transcript;
+    bindTranscribe(row, msg);
     if (msg.type === "voice_note") {
       const canvas = row.querySelector("canvas");
       const peaks = msg.waveform || [];
@@ -494,17 +706,48 @@
       try {
         const ev = JSON.parse(e.data);
         if (ev.type === "chat.message" && ev.message) upsertMessage(ev.message);
+        if (ev.type === "chat.transcript" && ev.message_id) {
+          if (ev.transcript && ev.transcript.status && ev.transcript.status !== "pending") {
+            if (state.pollers[ev.message_id]) {
+              clearInterval(state.pollers[ev.message_id]);
+              delete state.pollers[ev.message_id];
+            }
+          }
+        }
+        if (ev.type === "chat.deleted" && ev.message_id) {
+          const row = document.getElementById("m-" + ev.message_id);
+          if (row) row.remove();
+        }
       } catch (_) { /* ignore */ }
     };
     ws.onclose = () => setTimeout(connect, 2000);
   }
 
   async function boot() {
-    const [langs, dialogs, settings] = await Promise.all([
+    const [langs, dialogs, settings, chat] = await Promise.all([
       fetch("/api/languages").then((r) => r.json()),
       fetch("/api/chat/dialogs").then((r) => r.json()),
       fetch("/api/settings").then((r) => r.json()),
+      fetch("/api/chat").then((r) => r.json()).catch(() => ({})),
     ]);
+    state.uiLang = localStorage.getItem("ui_lang") || document.documentElement.lang || "ru";
+    if (state.uiLang !== "en") state.uiLang = "ru";
+    applyUiLang();
+    $("uiLangRu").addEventListener("click", () => {
+      state.uiLang = "ru";
+      localStorage.setItem("ui_lang", "ru");
+      applyUiLang();
+      document.querySelectorAll(".msg").forEach((row) => { if (row._msg) upsertMessage(row._msg); });
+    });
+    $("uiLangEn").addEventListener("click", () => {
+      state.uiLang = "en";
+      localStorage.setItem("ui_lang", "en");
+      applyUiLang();
+      document.querySelectorAll(".msg").forEach((row) => { if (row._msg) upsertMessage(row._msg); });
+    });
+    const tr = (chat && chat.transcription) || {};
+    state.entitled = !!tr.entitled;
+    state.freeMode = tr.free_mode || "lock";
     const sel = $("target");
     langs.forEach((l) => {
       const o = document.createElement("option");

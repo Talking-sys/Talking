@@ -43,7 +43,7 @@ def test_index_links_to_chat(make_client):
     assert "camera=(self)" in c.get("/").headers["permissions-policy"]
 
 
-def test_upload_wav_creates_voice_note_with_transcript(make_client):
+def test_upload_wav_creates_voice_note_without_auto_transcript(make_client):
     c = make_client()
     c.stt.push("hello world", "en")
     d = _dialog(c)
@@ -52,15 +52,19 @@ def test_upload_wav_creates_voice_note_with_transcript(make_client):
     assert r.status_code == 201, r.text
     msg = r.json()
     assert msg["type"] == "voice_note"
+    assert msg["kind"] == "voice_note"
     assert msg["duration_ms"] == 800
     assert msg["media_id"]
     assert msg["play_url"].startswith("/api/chat/media/")
-    assert msg["transcript"] == "hello world"
-    assert msg["translation"] == "[en→ru] hello world"
-    assert msg["transcript_status"] == "ok"
+    assert not msg.get("transcript")
+    assert msg.get("transcript_status") in (None, "")
     assert msg["waveform"][0] == 4
     listed = c.get(f"/api/chat/dialogs/{d}/messages").json()
     assert listed[-1]["id"] == msg["id"]
+    chat = c.get("/api/chat").json()
+    assert chat["transcription"]["on_demand"] is True
+    assert chat["transcription"]["premium_required"] is True
+    assert chat["transcription"]["entitled"] is False
 
 
 def test_upload_then_message_create(make_client):
@@ -86,8 +90,8 @@ def test_video_note_webm_magic(make_client):
     assert r.status_code == 201, r.text
     assert r.json()["type"] == "video_note"
     assert r.json()["mime"] == "video/webm"
-    # Fake webm has no PCM; STT is skipped (or ok if ffmpeg invents silence + FakeSTT).
-    assert r.json()["transcript_status"] in ("ok", "skipped", "error")
+    # Upload is on-demand: no automatic STT on the note.
+    assert r.json().get("transcript_status") in (None, "", "pending")
 
 
 def test_reject_exe_and_html_and_png(make_client):
@@ -181,19 +185,19 @@ def test_text_message_limit_and_rate(make_client):
     assert 429 in codes
 
 
-def test_stt_skipped_when_not_ready(make_client):
+def test_stt_not_run_on_upload(make_client):
     class DeadSTT:
         ready = False
         loaded_name = None
 
         def transcribe(self, *a, **k):
-            raise AssertionError("STT should not run")
+            raise AssertionError("STT should not run on upload")
 
     c = make_client(stt=DeadSTT())
     d = _dialog(c)
     msg = _note(c, d, make_wav_bytes()).json()
-    assert msg["transcript_status"] == "skipped"
-    assert "STT" in (msg.get("transcript_reason") or "")
+    assert not msg.get("transcript")
+    assert msg.get("transcript_status") in (None, "")
 
 
 def test_chat_ws_pushes_message(make_client):

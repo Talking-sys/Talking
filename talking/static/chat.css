@@ -25,9 +25,51 @@
 .msg .translation { color: var(--teal); }
 .msg .transcript { color: var(--muted); font-size: 0.95rem; }
 .msg .orig-wrap[hidden], .show-orig[hidden] { display: none; }
-.show-orig {
+.show-orig, .copy-transcript {
   background: none; border: 0; color: var(--violet); padding: 0; cursor: pointer;
   font: inherit; font-size: 13px; text-align: left;
+}
+
+.ui-lang {
+  display: flex; gap: 4px; margin-left: 8px;
+}
+.ui-lang-btn {
+  min-width: 40px; min-height: 36px; border-radius: 10px; border: 1px solid #2a3654;
+  background: #1c2740; color: var(--muted); font: inherit; font-size: 13px; cursor: pointer;
+}
+.ui-lang-btn[aria-pressed="true"] {
+  color: var(--ink); border-color: var(--teal); background: #14303a;
+}
+
+.note-tools { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.transcribe-btn {
+  display: inline-flex; align-items: center; gap: 6px;
+  min-height: 36px; padding: 6px 10px; border-radius: 12px;
+  border: 1px solid #2a3654; background: #142033; color: var(--teal);
+  font: inherit; font-size: 13px; cursor: pointer;
+}
+.transcribe-btn .glyph { font-weight: 700; letter-spacing: 0.02em; }
+.transcribe-btn.is-locked {
+  color: var(--muted); cursor: not-allowed; opacity: 0.85;
+}
+.transcribe-btn.is-loading { color: var(--violet); }
+.transcribe-btn.is-loading .glyph { animation: transcribe-pulse 1s ease-in-out infinite; }
+.transcribe-btn:focus-visible { outline: 2px solid var(--teal); outline-offset: 2px; }
+.transcript-panel {
+  background: #101a30; border-left: 3px solid var(--teal); border-radius: 0 12px 12px 0;
+  padding: 8px 10px; display: grid; gap: 6px;
+}
+.transcript-panel[hidden] { display: none !important; }
+.transcript-panel .transcript-body { color: var(--ink); white-space: pre-wrap; word-break: break-word; margin: 0; }
+.transcript-actions { display: flex; gap: 12px; flex-wrap: wrap; }
+.transcript-status { margin: 0; font-size: 13px; color: var(--muted); }
+.upsell-hint { margin: 0; font-size: 13px; color: var(--violet); }
+@keyframes transcribe-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.35; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .transcribe-btn.is-loading .glyph { animation: none; }
 }
 
 .circle-note {

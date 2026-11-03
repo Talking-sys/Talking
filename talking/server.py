@@ -12,7 +12,11 @@ from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 
 from . import __version__
+from .chat.events import ensure_hub, register_chat_ws
+from .chat.http import register_message_routes
+from .chat.messages import MessageStore
 from .chat.routes import register_chat
+from .chat.translation_cache import MessageTranslationCache
 from .voice_translate.routes import register_voice_translate
 from .commercial.client import verify_webhook
 from .config import Settings, WHISPER_MODELS
@@ -23,6 +27,8 @@ from .languages import languages_payload
 from .security import SecurityHeadersMiddleware, TokenBucket, client_ip, load_server_secret, sign, unsign
 from .settings_store import PAUSE_MAX, PAUSE_MIN
 from .store import ping_postgres, ping_redis
+from .unfurl.routes import register_unfurl_routes
+from .unfurl.service import UnfurlService
 from .vad import pcm16_to_float
 
 log = logging.getLogger(__name__)
@@ -37,7 +43,9 @@ def _html(name: str, settings: Settings) -> HTMLResponse:
     return HTMLResponse(html)
 
 
-def create_app(settings: Settings | None = None, engine: Engine | None = None) -> FastAPI:
+def create_app(settings: Settings | None = None, engine: Engine | None = None,
+               unfurl: UnfurlService | None = None,
+               messages: MessageStore | None = None) -> FastAPI:
     s = settings or Settings()
     secure_dir(s.data_dir)
     eng = engine or Engine(s)
@@ -48,16 +56,31 @@ def create_app(settings: Settings | None = None, engine: Engine | None = None) -
     app.state.engine = eng
     app.state.settings = s
     app.state.secret = secret
+    unfurl = unfurl or UnfurlService(
+        redis_url=s.redis_url,
+        stub=s.unfurl_stub,
+        cache_ttl=s.unfurl_cache_ttl,
+        timeout=s.unfurl_timeout,
+        max_html_bytes=s.unfurl_max_bytes,
+        max_redirects=s.unfurl_max_redirects,
+    )
+    app.state.unfurl = unfurl
+    app.state.chat_translations = MessageTranslationCache()
+    ensure_hub(app)
 
     origins = [o.strip() for o in s.cors_origins.split(",") if o.strip()]
     if origins:
-        app.add_middleware(CORSMiddleware, allow_origins=origins, allow_methods=["GET", "POST"],
+        app.add_middleware(CORSMiddleware, allow_origins=origins, allow_methods=["GET", "POST", "PATCH"],
                            allow_headers=["Content-Type"], allow_credentials=True, max_age=600)
     app.add_middleware(SecurityHeadersMiddleware, production=s.production)
     app.mount("/static", StaticFiles(directory=STATIC), name="static")
 
     ws_limiter = TokenBucket(s.ws_connects_per_min)
     api_limiter = TokenBucket(s.rate_limit_per_min)
+    unfurl_limiter = TokenBucket(s.unfurl_rate_per_min)
+    chat_msg_limiter = TokenBucket(s.chat_msg_rate_per_min)
+    chat_edit_limiter = TokenBucket(s.chat_edit_rate_per_min)
+    app.state.chat_edit_limiter = chat_edit_limiter
 
     def _limit(request: Request):
         if not api_limiter.allow(client_ip(request)):
@@ -113,6 +136,13 @@ def create_app(settings: Settings | None = None, engine: Engine | None = None) -
             "third-party APIs (xAI and others) as segment text without an account binding. Cloud "
             "translation can be turned off, but the feature then becomes unavailable.</p>"
             f"<p>Contact: {s.contact_email}. This page is a lawyer-ready template, not legal advice.</p>"
+            "<h2>Link previews</h2>"
+            "<p>When a message contains a URL, Talking's servers fetch publicly available "
+            "metadata (Open Graph, Twitter Card, oEmbed, HTML title) to show a preview card. "
+            "The destination site sees Talking's server IP, not yours. Cookies are never sent. "
+            "Preview images are downloaded, re-encoded (EXIF stripped) and served from Talking "
+            "so other users' devices do not hotlink the origin. Opening a link uses a sandboxed "
+            "iframe (no javascript: or data: URLs) or falls back to the system browser.</p>"
             "</body>"
         )
 
@@ -210,6 +240,18 @@ def create_app(settings: Settings | None = None, engine: Engine | None = None) -
 
     register_chat(app)
     register_voice_translate(app)
+    if messages is None:
+        messages = MessageStore(chat_store=app.state.chat_store)
+    app.state.messages = messages
+
+    register_unfurl_routes(app, unfurl=unfurl, limiter=unfurl_limiter)
+    register_message_routes(
+        app, store=messages, unfurl=unfurl, limiter=chat_msg_limiter,
+        edit_limiter=chat_edit_limiter,
+        hub=app.state.chat_hub,
+        translations=app.state.chat_translations,
+    )
+    register_chat_ws(app)  # no-op: register_chat already bound /ws/chat
 
     # --- Open-core placeholders (future modules) ---
     @app.get("/api/games")

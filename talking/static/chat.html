@@ -17,15 +17,19 @@
       <strong id="dialogTitle">Чат</strong>
       <small id="net">кружочки · заметки</small>
     </div>
+    <div class="ui-lang" role="group" aria-label="Interface language">
+      <button type="button" id="uiLangRu" class="ui-lang-btn" aria-pressed="true" lang="ru">RU</button>
+      <button type="button" id="uiLangEn" class="ui-lang-btn" aria-pressed="false" lang="en">EN</button>
+    </div>
     <label class="field lang-mini">
-      <span class="sr-only">Язык перевода заметок</span>
+      <span class="sr-only" data-i18n="targetLang">Язык перевода заметок</span>
       <select id="target" aria-label="Язык перевода заметок"></select>
     </label>
     <a class="nav-chat" href="/translate">Голос</a>
   </header>
 
   <main id="feed" class="chat-feed" aria-live="polite">
-    <p id="empty" class="empty">Короткое нажатие справа переключает голос и кружочек. Удерживайте, чтобы записать; влево — отмена; вверх — замок.</p>
+    <p id="empty" class="empty" data-i18n="empty">Короткое нажатие справа переключает голос и кружочек. Удерживайте, чтобы записать; влево — отмена; вверх — замок.</p>
   </main>
 
   <div id="recordOverlay" class="record-overlay" hidden>

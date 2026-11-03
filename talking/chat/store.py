@@ -98,7 +98,7 @@ class ChatStore:
 
     def add_message(self, user_id: str, msg: Message) -> Message:
         self.get_dialog(user_id, msg.dialog_id)
-        line = json.dumps(msg.to_public(), ensure_ascii=False)
+        line = json.dumps(msg.to_storage(), ensure_ascii=False)
         with self._lock:
             p = self._messages_path(user_id, msg.dialog_id)
             with p.open("a", encoding="utf-8") as f:
@@ -111,7 +111,7 @@ class ChatStore:
         return msg
 
     def update_message(self, user_id: str, msg: Message) -> Message:
-        """Rewrite one JSONL line (used when a later STT pass fills a transcript)."""
+        """Rewrite one JSONL line (STT backfill, text edits)."""
         with self._lock:
             p = self._messages_path(user_id, msg.dialog_id)
             if not p.exists():
@@ -125,7 +125,7 @@ class ChatStore:
                     out.append(line)
                     continue
                 if d.get("id") == msg.id:
-                    out.append(json.dumps(msg.to_public(), ensure_ascii=False))
+                    out.append(json.dumps(msg.to_storage(), ensure_ascii=False))
                 else:
                     out.append(line)
             tmp = p.with_suffix(".tmp")
@@ -155,3 +155,81 @@ class ChatStore:
             if m.id == message_id:
                 return m
         return None
+
+    def find_message(self, user_id: str, message_id: str) -> Message | None:
+        try:
+            message_id = check_id(message_id, "message_id")
+        except ValueError:
+            return None
+        for d in self.list_dialogs(user_id):
+            found = self.get_message(user_id, d.id, message_id)
+            if found is not None:
+                return found
+        return None
+
+    def delete_message(self, user_id: str, dialog_id: str, message_id: str) -> Message | None:
+        """Remove one JSONL row. Transcript fields live on the row, so they go too."""
+        dialog_id = check_id(dialog_id, "dialog_id")
+        try:
+            message_id = check_id(message_id, "message_id")
+        except ValueError:
+            return None
+        removed: Message | None = None
+        with self._lock:
+            p = self._messages_path(user_id, dialog_id)
+            if not p.exists():
+                return None
+            rows = p.read_text(encoding="utf-8").splitlines()
+            out: list[str] = []
+            for line in rows:
+                if not line.strip():
+                    continue
+                try:
+                    d = json.loads(line)
+                except json.JSONDecodeError:
+                    out.append(line)
+                    continue
+                if d.get("id") == message_id:
+                    try:
+                        removed = Message.from_dict(d)
+                    except (TypeError, KeyError):
+                        removed = None
+                    continue
+                out.append(line)
+            tmp = p.with_suffix(".tmp")
+            tmp.write_text("\n".join(out) + ("\n" if out else ""), encoding="utf-8")
+            tmp.replace(p)
+        return removed
+
+    def purge_older_than(self, user_id: str, max_age_s: float) -> list[Message]:
+        """Drop messages past retention. Transcripts are on the rows, so they expire too."""
+        if max_age_s <= 0:
+            return []
+        cutoff = time.time() - max_age_s
+        gone: list[Message] = []
+        for d in self.list_dialogs(user_id):
+            with self._lock:
+                p = self._messages_path(user_id, d.id)
+                if not p.exists():
+                    continue
+                keep: list[str] = []
+                for line in p.read_text(encoding="utf-8").splitlines():
+                    if not line.strip():
+                        continue
+                    try:
+                        raw = json.loads(line)
+                        created = float(raw.get("created_at") or 0)
+                    except (json.JSONDecodeError, TypeError, ValueError):
+                        keep.append(line)
+                        continue
+                    if created and created < cutoff:
+                        try:
+                            gone.append(Message.from_dict(raw))
+                        except (TypeError, KeyError):
+                            pass
+                        continue
+                    keep.append(line)
+                tmp = p.with_suffix(".tmp")
+                tmp.write_text("\n".join(keep) + ("\n" if keep else ""), encoding="utf-8")
+                tmp.replace(p)
+        return gone
