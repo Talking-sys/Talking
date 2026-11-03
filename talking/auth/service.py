@@ -1,16 +1,27 @@
-"""Session, anonymous, recovery, and phone auth operations."""
+"""Session, anonymous, recovery, phone, and Apple auth operations."""
 from __future__ import annotations
 
+import json
 import logging
+import secrets
 from datetime import timedelta
 from typing import Any
 
+from .apple import (
+    AppleClient,
+    AppleError,
+    nickname_from_apple_name,
+    parse_apple_user_form,
+    pkce_pair,
+)
 from .crypto import (
     ACCESS_TTL_S,
     CSRF_TTL_S,
     FRESH_AUTH_S,
+    OAUTH_TTL_S,
     PHONE_OTP_TTL_S,
     REFRESH_TTL_S,
+    email_hash,
     encrypt_pii,
     hash_token,
     ip_hash,
@@ -52,6 +63,7 @@ class AuthService:
         log_salt: bytes,
         enc_key: bytes | None,
         phone_provider: PhoneProvider | None = None,
+        apple: AppleClient | None = None,
         sign_fn=None,
         allow_debug_otp: bool = False,
     ):
@@ -60,6 +72,7 @@ class AuthService:
         self.log_salt = log_salt
         self.enc_key = enc_key
         self.phone_provider = phone_provider
+        self.apple = apple
         self.sign = sign_fn
         self.allow_debug_otp = allow_debug_otp
 
@@ -366,6 +379,240 @@ class AuthService:
         await self.store.create_identity(ident)
         await self._event("phone_link", user_id=user.id, ip=ip)
         return {"ok": True, "linked": True, "method": {"id": ident.id, "provider": "phone"}}
+
+    # --- Sign in with Apple ---
+
+    def apple_enabled(self) -> bool:
+        return self.apple is not None
+
+    def _require_apple(self) -> AppleClient:
+        if self.apple is None:
+            raise AuthError(503, "apple_unconfigured")
+        return self.apple
+
+    def _apple_email_fields(self, email: str | None) -> dict:
+        if not email:
+            return {"email_hash": None, "email_enc": None}
+        return {
+            "email_hash": email_hash(self.log_salt, email),
+            "email_enc": encrypt_pii(self.enc_key, email),
+        }
+
+    async def _maybe_nickname(self, user: UserRecord, name: dict | None) -> None:
+        if user.nickname or not name:
+            return
+        nick = nickname_from_apple_name(name)
+        if not nick:
+            return
+        taken = await self.store.get_user_by_nickname(nick)
+        if taken is not None:
+            return
+        user.nickname = nick
+        user.updated_at = utcnow()
+        await self.store.save_user(user)
+
+    async def start_apple(
+        self, *, intent: str = "signin", user_id: str | None = None, ip: str | None = None,
+    ) -> dict:
+        apple = self._require_apple()
+        if intent not in ("signin", "link"):
+            raise AuthError(400, "invalid_intent")
+        if intent == "link" and not user_id:
+            raise AuthError(401, "not signed in")
+        state = secrets.token_urlsafe(32)
+        nonce = secrets.token_urlsafe(32)
+        verifier, challenge = pkce_pair()
+        packed = json.dumps({"v": verifier, "n": nonce}, separators=(",", ":"))
+        ch = ChallengeRecord(
+            id=new_id(), kind="apple_oauth", subject_hash=hash_token(state),
+            channel=intent, provider="apple", provider_ref=packed,
+            expires_at=utcnow() + timedelta(seconds=OAUTH_TTL_S),
+            ip_hash=ip_hash(self.log_salt, ip) if ip else None,
+            user_id=user_id if intent == "link" else None,
+        )
+        await self.store.create_challenge(ch)
+        await self._event("apple_start", user_id=user_id, ip=ip, intent=intent)
+        return {
+            "url": apple.authorization_url(state=state, nonce=nonce, challenge=challenge),
+            "challenge_id": ch.id,
+            "intent": intent,
+        }
+
+    async def _load_apple_challenge(self, state: str) -> ChallengeRecord:
+        state = (state or "").strip()
+        if not state:
+            raise AuthError(401, "invalid_state")
+        ch = await self.store.latest_challenge(hash_token(state), "apple_oauth")
+        if ch is None or ch.consumed_at is not None:
+            raise AuthError(401, "invalid_state")
+        if ch.expires_at < utcnow():
+            raise AuthError(401, "invalid_state")
+        return ch
+
+    async def _consume_challenge(self, ch: ChallengeRecord) -> None:
+        ch.consumed_at = utcnow()
+        await self.store.save_challenge(ch)
+
+    async def _apple_identity_from_code(self, ch: ChallengeRecord, code: str):
+        apple = self._require_apple()
+        code = (code or "").strip()
+        if not code:
+            raise AuthError(400, "code_required")
+        try:
+            packed = json.loads(ch.provider_ref or "{}")
+            verifier = packed["v"]
+            nonce = packed["n"]
+        except Exception:
+            raise AuthError(401, "invalid_state")
+        try:
+            tokens = await apple.exchange_code(code, verifier)
+            ident = await apple.validate_id_token(str(tokens.get("id_token") or ""), nonce=nonce)
+        except AppleError as exc:
+            raise AuthError(401, exc.code)
+        return ident
+
+    async def complete_apple(
+        self,
+        *,
+        code: str,
+        state: str,
+        user_form: Any = None,
+        current_user: UserRecord | None = None,
+        session: SessionRecord | None = None,
+        ip: str | None = None,
+        user_agent: str | None = None,
+    ) -> dict:
+        ch = await self._load_apple_challenge(state)
+        if ch.channel == "link":
+            if current_user is None or session is None:
+                raise AuthError(401, "not signed in")
+            if ch.user_id != current_user.id:
+                raise AuthError(401, "invalid_state")
+            if not self.session_is_fresh(session):
+                raise AuthError(403, "fresh_session_required")
+        await self._consume_challenge(ch)
+        apple_id = await self._apple_identity_from_code(ch, code)
+        form = parse_apple_user_form(user_form)
+        existing = await self.store.get_identity("apple", apple_id.subject)
+
+        if ch.channel == "link":
+            if existing is not None:
+                if existing.user_id == current_user.id:
+                    return {"ok": True, "linked": True, "already": True, "link": True}
+                # Never auto-merge with the account that already owns this Apple sub.
+                raise AuthError(409, "apple_taken")
+            ident = IdentityRecord(
+                id=new_id(), user_id=current_user.id, provider="apple",
+                subject=apple_id.subject, email_verified=apple_id.email_verified,
+                **self._apple_email_fields(apple_id.email),
+            )
+            await self.store.create_identity(ident)
+            await self._maybe_nickname(
+                current_user, form.get("name") if isinstance(form, dict) else None,
+            )
+            await self._event("apple_link", user_id=current_user.id, ip=ip)
+            return {
+                "ok": True, "linked": True, "link": True,
+                "method": {"id": ident.id, "provider": "apple"},
+                "private_relay": apple_id.private_relay,
+            }
+
+        created = False
+        if existing is None:
+            # Never look up or merge by email (including private-relay addresses).
+            user = UserRecord(id=new_id())
+            await self.store.create_user(user)
+            ident = IdentityRecord(
+                id=new_id(), user_id=user.id, provider="apple", subject=apple_id.subject,
+                email_verified=apple_id.email_verified, **self._apple_email_fields(apple_id.email),
+            )
+            await self.store.create_identity(ident)
+            await self._maybe_nickname(user, form.get("name") if isinstance(form, dict) else None)
+            created = True
+        else:
+            user = await self.store.get_user(existing.user_id)
+            if user is None or user.status != "active":
+                raise AuthError(401, "invalid_state")
+            # Name is only sent on first authorization; email may appear once too.
+            if apple_id.email and not existing.email_enc:
+                existing.email_verified = apple_id.email_verified
+                fields = self._apple_email_fields(apple_id.email)
+                existing.email_hash = fields["email_hash"]
+                existing.email_enc = fields["email_enc"]
+                await self.store.save_identity(existing)
+        sess, refresh = await self.issue_session(user.id, ip=ip, user_agent=user_agent)
+        await self._event("apple_signin", user_id=user.id, ip=ip, created=int(created))
+        log.info("apple sign-in user=%s created=%s", self.uid_log(user.id), int(created))
+        return {
+            "user": self.public_user(user),
+            "session": sess,
+            "refresh": refresh,
+            "created": created,
+            "private_relay": apple_id.private_relay,
+        }
+
+    async def handle_apple_notification(self, payload_jwt: str) -> dict:
+        apple = self._require_apple()
+        token = (payload_jwt or "").strip()
+        if not token:
+            raise AuthError(400, "invalid_notification")
+        try:
+            claims = await apple.validate_notification(token)
+        except AppleError as exc:
+            raise AuthError(401, exc.code)
+        raw_events = claims.get("events")
+        parsed: Any = raw_events
+        if isinstance(raw_events, str):
+            try:
+                parsed = json.loads(raw_events)
+            except Exception:
+                parsed = None
+        events = parsed if isinstance(parsed, list) else ([parsed] if isinstance(parsed, dict) else [])
+        handled = 0
+        close_users: list[str] = []
+        for event in events:
+            if not isinstance(event, dict):
+                continue
+            etype = str(event.get("type") or "")
+            sub = str(event.get("sub") or "").strip()
+            if not sub:
+                continue
+            ident = await self.store.get_identity("apple", sub)
+            if ident is None:
+                continue
+            user = await self.store.get_user(ident.user_id)
+            if etype in ("consent-revoked", "account-delete"):
+                await self.store.delete_identity(ident.id)
+                remaining = await self.store.list_identities(ident.user_id)
+                revoked = 0
+                if not remaining and user is not None:
+                    user.status = "deleting"
+                    user.updated_at = utcnow()
+                    await self.store.save_user(user)
+                    revoked = await self.store.revoke_user_sessions(ident.user_id)
+                    close_users.append(ident.user_id)
+                await self._event(
+                    "apple_" + etype.replace("-", "_"),
+                    user_id=ident.user_id,
+                    remaining=len(remaining),
+                    revoked=revoked,
+                )
+                log.info(
+                    "apple notification type=%s user=%s remaining=%s",
+                    etype, self.uid_log(ident.user_id), len(remaining),
+                )
+                handled += 1
+            elif etype == "email-disabled" and ident.email_enc:
+                ident.email_enc = None
+                ident.email_hash = None
+                ident.email_verified = False
+                await self.store.save_identity(ident)
+                await self._event("apple_email_disabled", user_id=ident.user_id)
+                handled += 1
+            elif etype == "email-enabled":
+                await self._event("apple_email_enabled", user_id=ident.user_id)
+                handled += 1
+        return {"ok": True, "handled": handled, "close_users": close_users}
 
     async def unlink_method(self, user_id: str, ident_id: str) -> None:
         ident = await self.store.get_identity_by_id(ident_id)
