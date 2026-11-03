@@ -1,4 +1,7 @@
-"""In-process fan-out for /ws/chat. M4 can swap in Redis pubsub."""
+"""In-process fan-out for /ws/chat. M4 can swap in Redis pubsub.
+
+Single ChatHub for notes, link-preview edits, and transcription jobs.
+"""
 from __future__ import annotations
 
 import asyncio
@@ -50,3 +53,14 @@ class ChatHub:
             loop.call_soon_threadsafe(_fanout)
         except RuntimeError:
             _fanout()
+
+    def publish_edit(self, msg_public: dict) -> None:
+        event = {"type": "message_edited", "message": msg_public}
+        keys = {
+            "*",
+            str(msg_public.get("sender_id") or ""),
+            str(msg_public.get("conversation_id") or msg_public.get("dialog_id") or ""),
+        }
+        for key in keys:
+            if key:
+                self.publish(key, event)

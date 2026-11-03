@@ -25,6 +25,7 @@ jobs:
           APP_TRANSLATE_PROVIDERS: stub
           APP_TTS_PROVIDERS: ""
           APP_ENV: test
+          UNFURL_STUB: "0"
         run: pytest -q
       - name: pip-audit (non-blocking on first skeleton)
         continue-on-error: true

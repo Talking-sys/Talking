@@ -29,6 +29,8 @@ from talking.ids import check_id
 from talking.languages import WHISPER_LANGUAGES
 from talking.security import TokenBucket, client_ip, unsign
 
+from . import PARTIAL
+from .events import ensure_hub
 from .hub import ChatHub
 from .media import (
     DownloadTokens, MediaError, MediaLibrary,
@@ -98,7 +100,7 @@ def register_chat(app: FastAPI) -> None:
         video_max=s.chat_video_max_bytes,
     )
     app.state.chat_tokens = DownloadTokens(f"{data}/chat/download-tokens.json", app.state.secret)
-    app.state.chat_hub = ChatHub()
+    app.state.chat_hub = ensure_hub(app)
     app.state.chat_msg_limiter = TokenBucket(s.chat_msg_per_min, burst=s.chat_msg_per_min)
     app.state.chat_upload_limiter = TokenBucket(s.chat_upload_per_min, burst=s.chat_upload_per_min)
     app.state.chat_transcribe_limiter = TokenBucket(
@@ -184,6 +186,7 @@ def register_chat(app: FastAPI) -> None:
             "module": "chat",
             "stage": "notes-slice",
             "status": "partial",
+            "partial": list(PARTIAL),
             "feature": "notes",
             "message": "Telegram-style voice_note / video_note. Full chat is ROADMAP M4.",
             "roadmap_m4": "Unique nicks, prefix search, groups, block, 3-minute auto-delete extend this store.",
@@ -501,6 +504,7 @@ def register_chat(app: FastAPI) -> None:
         q: asyncio.Queue = asyncio.Queue(maxsize=200)
         hub: ChatHub = app.state.chat_hub
         hub.subscribe(uid, q)
+        hub.subscribe("*", q)
 
         async def sender():
             while True:
@@ -527,4 +531,5 @@ def register_chat(app: FastAPI) -> None:
             pass
         finally:
             hub.unsubscribe(uid, q)
+            hub.unsubscribe("*", q)
             send_task.cancel()

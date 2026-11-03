@@ -98,7 +98,7 @@ class ChatStore:
 
     def add_message(self, user_id: str, msg: Message) -> Message:
         self.get_dialog(user_id, msg.dialog_id)
-        line = json.dumps(msg.to_public(), ensure_ascii=False)
+        line = json.dumps(msg.to_storage(), ensure_ascii=False)
         with self._lock:
             p = self._messages_path(user_id, msg.dialog_id)
             with p.open("a", encoding="utf-8") as f:
@@ -111,7 +111,7 @@ class ChatStore:
         return msg
 
     def update_message(self, user_id: str, msg: Message) -> Message:
-        """Rewrite one JSONL line (used when a later STT pass fills a transcript)."""
+        """Rewrite one JSONL line (STT backfill, text edits)."""
         with self._lock:
             p = self._messages_path(user_id, msg.dialog_id)
             if not p.exists():
@@ -125,7 +125,7 @@ class ChatStore:
                     out.append(line)
                     continue
                 if d.get("id") == msg.id:
-                    out.append(json.dumps(msg.to_public(), ensure_ascii=False))
+                    out.append(json.dumps(msg.to_storage(), ensure_ascii=False))
                 else:
                     out.append(line)
             tmp = p.with_suffix(".tmp")
