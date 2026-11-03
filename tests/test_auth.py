@@ -10,6 +10,7 @@ ACCOUNTS = {
     "LOG_SALT": "test-log-salt-not-a-real-salt",
     "PUBLIC_ORIGIN": "https://testserver",
     "SMS_PROVIDER": "console",
+    "MAIL_PROVIDER": "console",
     "DB_ENCRYPTION_KEY": "test-db-encryption-key-not-secret",
     "APP_ENV": "test",
 }
@@ -68,6 +69,9 @@ def _production_accounts_env(monkeypatch, tmp_path, **extra):
     monkeypatch.setenv("LOG_SALT", "s" * 32)
     monkeypatch.setenv("DATABASE_URL", "postgresql://talking:talking@localhost:5432/talking")
     monkeypatch.setenv("APP_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("MAIL_PROVIDER", "smtp")
+    monkeypatch.setenv("SMTP_HOST", "smtp.example.invalid")
+    monkeypatch.setenv("SMTP_FROM", "noreply@example.invalid")
     for key, value in extra.items():
         if value is None:
             monkeypatch.delenv(key, raising=False)
@@ -111,11 +115,45 @@ def test_production_accepts_twilio_verify(monkeypatch, tmp_path):
         TWILIO_VERIFY_SERVICE_SID="VAtest",
     )
     from talking.auth.http import validate_auth_settings
+    from talking.auth.mail import build_mail_provider
     from talking.auth.providers import build_phone_provider
     from talking.config import Settings
     settings = Settings()
     validate_auth_settings(settings)
     assert build_phone_provider(settings).name == "twilio"
+    assert build_mail_provider(settings).name == "smtp"
+
+
+def test_production_refuses_console_mail_provider(monkeypatch, tmp_path):
+    _production_accounts_env(
+        monkeypatch, tmp_path,
+        SMS_PROVIDER="twilio",
+        TWILIO_ACCOUNT_SID="ACtest",
+        TWILIO_AUTH_TOKEN="token",
+        TWILIO_VERIFY_SERVICE_SID="VAtest",
+        MAIL_PROVIDER="console",
+    )
+    from talking.config import Settings
+    from talking.server import create_app
+    with pytest.raises(RuntimeError, match="MAIL_PROVIDER"):
+        create_app(Settings())
+
+
+def test_production_refuses_smtp_without_host(monkeypatch, tmp_path):
+    _production_accounts_env(
+        monkeypatch, tmp_path,
+        SMS_PROVIDER="twilio",
+        TWILIO_ACCOUNT_SID="ACtest",
+        TWILIO_AUTH_TOKEN="token",
+        TWILIO_VERIFY_SERVICE_SID="VAtest",
+        MAIL_PROVIDER="smtp",
+        SMTP_HOST=None,
+        SMTP_FROM="noreply@example.invalid",
+    )
+    from talking.config import Settings
+    from talking.server import create_app
+    with pytest.raises(RuntimeError, match="SMTP"):
+        create_app(Settings())
 
 
 def test_twilio_incomplete_does_not_fallback_to_console(monkeypatch, tmp_path):

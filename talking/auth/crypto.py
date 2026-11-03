@@ -16,6 +16,7 @@ ACCESS_TTL_S = 15 * 60
 REFRESH_TTL_S = 30 * 24 * 3600
 RECOVERY_TTL_S = 0  # recovery codes do not expire; they are single-use
 PHONE_OTP_TTL_S = 10 * 60
+EMAIL_OTP_TTL_S = 10 * 60
 WS_TOKEN_TTL_S = 60
 WS_TOKEN_TTL_LOCAL_S = 3600
 FRESH_AUTH_S = 10 * 60
@@ -47,6 +48,10 @@ def hmac_hex(secret: bytes, value: str, *, n: int = 32) -> str:
 
 def phone_subject(secret: bytes, phone_e164: str) -> str:
     return hmac.new(secret, f"phone:{phone_e164}".encode("utf-8"), hashlib.sha256).hexdigest()
+
+
+def email_subject(secret: bytes, email: str) -> str:
+    return hmac.new(secret, f"email:{email}".encode("utf-8"), hashlib.sha256).hexdigest()
 
 
 def ip_hash(secret: bytes, ip: str) -> str:
@@ -102,3 +107,7 @@ def new_recovery_code() -> str:
 
 def new_otp_code() -> str:
     return f"{secrets.randbelow(1_000_000):06d}"
+
+
+def new_magic_token() -> str:
+    return secrets.token_urlsafe(32)
