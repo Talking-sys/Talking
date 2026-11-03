@@ -104,10 +104,14 @@ def test_post_message_rejects_too_long(make_client):
 
 
 def test_chat_placeholder_still_501(make_client):
+    """GET /api/chat is the live notes slice; partial still lists preview + edit."""
     c = make_client()
     r = c.get("/api/chat")
-    assert r.status_code == 501
-    assert r.json()["partial"] == ["link_previews", "message_edit"]
+    assert r.status_code == 200
+    partial = r.json()["partial"]
+    assert "link_previews" in partial
+    assert "message_edit" in partial
+    assert "notes" in partial
 
 
 def test_privacy_mentions_unfurl(make_client):

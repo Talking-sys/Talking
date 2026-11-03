@@ -64,8 +64,10 @@ Composer grows a Telegram-style banner (original one-liner + **×**).
 
 PR #3 (`cursor/telegram-round-notes-82e2`) is a **file-backed** dialog store
 (`talking/chat/store.py`, `models.py`, `routes.py`, `/chat`, `/ws/chat`).
-This PR keeps the **in-memory** `MessageStore` from the link-preview slice.
-Both can land; M4 should keep **one** store.
+This PR originally kept the **in-memory** `MessageStore` from the link-preview
+slice. **Landed together:** one `ChatStore`, one `Message` (`kind` canonical,
+`type` as alias), one `/ws/chat`. `MessageStore` is an adapter over that store
+(`GET/POST/PATCH /api/chat/messages` write the same JSONL as notes).
 
 ### Adopt these fields on PR #3 `Message`
 

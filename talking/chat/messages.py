@@ -1,75 +1,42 @@
-"""Minimal text-message model for link previews + Telegram-like edits.
+"""Text-message API over the unified chat store.
 
-Full chat (unique nicks, WS fan-out, instant translation, auto-delete) is
-ROADMAP M4. This store is in-memory, conversation-scoped, and kept in its
-own module so a parallel voice-note PR can add `kind="voice_note"` without
-rewriting unfurl.
+``MessageStore`` is the adapter used by ``GET/POST/PATCH /api/chat/messages``.
+In production it writes to the file-backed ``ChatStore`` (same JSONL as notes).
+Tests may construct an in-memory store without a ``ChatStore``.
 
-Edit fields (`edited_at`, `edit_count`, private `original_text`/`revisions`)
-are the contract PR #3 should copy onto its file-backed ``Message``. Public
-``to_dict()`` never includes revision history. See ``docs/CHAT_EDITING.md``.
+``ChatMessage`` is an alias of ``models.Message`` (``kind`` canonical, ``type``
+alias). Public ``to_dict()`` never includes revision history.
 """
 from __future__ import annotations
 
 import threading
 import time
 import uuid
-from dataclasses import dataclass, field
 
-from .edits import apply_text_edit, check_can_edit, public_edit_fields, validate_edit_text
+from .edits import apply_text_edit, check_can_edit, message_kind, validate_edit_text
+from .models import Message
 
 MAX_TEXT = 500
 MAX_PER_CONVERSATION = 200
 DEFAULT_CONVERSATION = "local"
 
-
-@dataclass
-class ChatMessage:
-    id: str
-    conversation_id: str
-    sender_id: str
-    kind: str
-    text: str
-    created_at: float
-    urls: list[str] = field(default_factory=list)
-    preview: dict | None = None
-    edited_at: float | None = None
-    edit_count: int = 0
-    # Server-only: never copied into to_dict().
-    original_text: str | None = None
-    revisions: list[dict] = field(default_factory=list)
-    # Optional translation payload (M4 / PR #3). Cleared on edit.
-    translation: str | None = None
-    src_lang: str | None = None
-    tgt_lang: str | None = None
-    translation_provider: str | None = None
-
-    def to_dict(self) -> dict:
-        d = {
-            "id": self.id,
-            "conversation_id": self.conversation_id,
-            "sender_id": self.sender_id,
-            "kind": self.kind,
-            "text": self.text,
-            "created_at": self.created_at,
-            "urls": list(self.urls),
-            "preview": self.preview,
-            "translation": self.translation,
-            "src_lang": self.src_lang,
-            "tgt_lang": self.tgt_lang,
-            "translation_provider": self.translation_provider,
-        }
-        d.update(public_edit_fields(self))
-        return d
+ChatMessage = Message
 
 
 class MessageStore:
-    """Process-local ring of messages. M4 should swap in Postgres."""
+    """Conversation-scoped messages. Backed by ChatStore when attached to the app."""
 
-    def __init__(self, max_per_conversation: int = MAX_PER_CONVERSATION):
+    def __init__(
+        self,
+        max_per_conversation: int = MAX_PER_CONVERSATION,
+        chat_store=None,
+        user_id: str = "local",
+    ):
         self.max_per_conversation = max_per_conversation
-        self._lock = threading.Lock()
-        self._by_conv: dict[str, list[ChatMessage]] = {}
+        self._chat = chat_store
+        self._user_id = user_id or "local"
+        self._lock = threading.RLock()
+        self._by_conv: dict[str, list[Message]] = {}
 
     def add(
         self,
@@ -85,19 +52,20 @@ class MessageStore:
         tgt_lang: str | None = None,
         translation_provider: str | None = None,
         created_at: float | None = None,
-    ) -> ChatMessage:
+    ) -> Message:
         text = (text or "").strip()
         if len(text) > MAX_TEXT:
             raise ValueError("text too long")
         if not text:
             raise ValueError("empty")
-        msg = ChatMessage(
+        conv = conversation_id or DEFAULT_CONVERSATION
+        msg = Message(
             id=str(uuid.uuid4()),
-            conversation_id=conversation_id or DEFAULT_CONVERSATION,
+            dialog_id=conv,
             sender_id=sender_id or "local",
-            kind=kind or "text",
-            text=text,
+            type=kind or "text",
             created_at=time.time() if created_at is None else float(created_at),
+            text=text,
             urls=list(urls or []),
             preview=preview,
             translation=translation,
@@ -105,8 +73,30 @@ class MessageStore:
             tgt_lang=tgt_lang,
             translation_provider=translation_provider,
         )
+        if self._chat is not None:
+            self._chat.ensure_default_dialog(self._user_id)
+            try:
+                self._chat.get_dialog(self._user_id, msg.dialog_id)
+            except KeyError:
+                if msg.dialog_id == DEFAULT_CONVERSATION:
+                    self._chat.ensure_default_dialog(self._user_id)
+                else:
+                    created = self._chat.create_dialog(self._user_id, msg.dialog_id)
+                    # Keep the caller-supplied conversation id on the message;
+                    # create_dialog mints a new id, so fall back to in-memory
+                    # only when the dialog id is not the default.
+                    if created.id != msg.dialog_id:
+                        with self._lock:
+                            bucket = self._by_conv.setdefault(msg.dialog_id, [])
+                            bucket.append(msg)
+                            overflow = len(bucket) - self.max_per_conversation
+                            if overflow > 0:
+                                del bucket[:overflow]
+                        return msg
+            self._chat.add_message(self._user_id, msg)
+            return msg
         with self._lock:
-            bucket = self._by_conv.setdefault(msg.conversation_id, [])
+            bucket = self._by_conv.setdefault(msg.dialog_id, [])
             bucket.append(msg)
             overflow = len(bucket) - self.max_per_conversation
             if overflow > 0:
@@ -117,7 +107,16 @@ class MessageStore:
         self,
         message_id: str,
         conversation_id: str | None = None,
-    ) -> ChatMessage | None:
+    ) -> Message | None:
+        if self._chat is not None:
+            if conversation_id:
+                try:
+                    return self._chat.get_message(self._user_id, conversation_id, message_id)
+                except (KeyError, ValueError):
+                    return None
+            found = self._chat.find_message(self._user_id, message_id)
+            if found is not None:
+                return found
         with self._lock:
             if conversation_id:
                 bucket = self._by_conv.get(conversation_id, ())
@@ -137,11 +136,20 @@ class MessageStore:
         conversation_id: str = DEFAULT_CONVERSATION,
         *,
         kinds: tuple[str, ...] = ("text",),
-    ) -> ChatMessage | None:
-        with self._lock:
-            bucket = self._by_conv.get(conversation_id or DEFAULT_CONVERSATION, ())
+    ) -> Message | None:
+        conv = conversation_id or DEFAULT_CONVERSATION
+        if self._chat is not None:
+            try:
+                bucket = self._chat.list_messages(self._user_id, conv, limit=0)
+            except (KeyError, ValueError):
+                bucket = []
             for m in reversed(bucket):
-                if m.sender_id == sender_id and m.kind in kinds:
+                if m.sender_id == sender_id and message_kind(m) in kinds:
+                    return m
+        with self._lock:
+            bucket = self._by_conv.get(conv, ())
+            for m in reversed(bucket):
+                if m.sender_id == sender_id and message_kind(m) in kinds:
                     return m
         return None
 
@@ -155,38 +163,38 @@ class MessageStore:
         window_s: int | float = 0,
         max_text: int = MAX_TEXT,
         conversation_id: str | None = None,
-    ) -> tuple[ChatMessage, bool]:
+    ) -> tuple[Message, bool]:
         """Apply a text edit. Returns (msg, changed). Raises EditError."""
         now = time.time() if now is None else float(now)
         cleaned = validate_edit_text(new_text, max_text)
         with self._lock:
-            msg = None
-            if conversation_id:
-                bucket = self._by_conv.get(conversation_id, ())
-                for m in bucket:
-                    if m.id == message_id:
-                        msg = m
-                        break
-            else:
-                for bucket in self._by_conv.values():
-                    for m in bucket:
-                        if m.id == message_id:
-                            msg = m
-                            break
-                    if msg is not None:
-                        break
+            msg = self.get(message_id, conversation_id)
             check_can_edit(msg, actor_id=actor_id, now=now, window_s=window_s)
             changed = apply_text_edit(msg, cleaned, now=now)
+            if changed and self._chat is not None and msg is not None:
+                self._chat.update_message(self._user_id, msg)
             return msg, changed  # type: ignore[return-value]
 
     def list(
         self,
         conversation_id: str = DEFAULT_CONVERSATION,
         limit: int = 50,
-    ) -> list[ChatMessage]:
+    ) -> list[Message]:
         limit = max(1, min(int(limit), self.max_per_conversation))
+        conv = conversation_id or DEFAULT_CONVERSATION
+        if self._chat is not None:
+            try:
+                self._chat.ensure_default_dialog(self._user_id)
+                rows = self._chat.list_messages(self._user_id, conv, limit=limit)
+            except (KeyError, ValueError):
+                rows = []
+            extra = self._by_conv.get(conv, [])
+            if extra:
+                rows = rows + extra
+                rows = rows[-limit:]
+            return rows
         with self._lock:
-            bucket = list(self._by_conv.get(conversation_id or DEFAULT_CONVERSATION, ()))
+            bucket = list(self._by_conv.get(conv, ()))
         return bucket[-limit:]
 
     def clear(self, conversation_id: str | None = None) -> None:

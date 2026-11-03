@@ -34,7 +34,11 @@ def test_languages_and_settings(make_client):
 
 def test_chat_and_games_are_placeholders(make_client):
     c = make_client()
-    assert c.get("/api/chat").status_code == 501
+    # Notes slice is live; games remain the M8 placeholder.
+    chat = c.get("/api/chat")
+    assert chat.status_code == 200
+    assert chat.json()["ok"] is True
+    assert "notes" in chat.json().get("partial", [])
     assert c.get("/api/games").status_code == 501
 
 

@@ -12,10 +12,10 @@ from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 
 from . import __version__
-from .chat import not_implemented as chat_stub
 from .chat.events import ensure_hub, register_chat_ws
 from .chat.http import register_message_routes
 from .chat.messages import MessageStore
+from .chat.routes import register_chat
 from .chat.translation_cache import MessageTranslationCache
 from .commercial.client import verify_webhook
 from .config import Settings, WHISPER_MODELS
@@ -55,7 +55,6 @@ def create_app(settings: Settings | None = None, engine: Engine | None = None,
     app.state.engine = eng
     app.state.settings = s
     app.state.secret = secret
-    # Link previews: isolated service + in-memory messages (M4 will replace the store).
     unfurl = unfurl or UnfurlService(
         redis_url=s.redis_url,
         stub=s.unfurl_stub,
@@ -64,9 +63,7 @@ def create_app(settings: Settings | None = None, engine: Engine | None = None,
         max_html_bytes=s.unfurl_max_bytes,
         max_redirects=s.unfurl_max_redirects,
     )
-    messages = messages or MessageStore()
     app.state.unfurl = unfurl
-    app.state.messages = messages
     app.state.chat_translations = MessageTranslationCache()
     ensure_hub(app)
 
@@ -240,12 +237,11 @@ def create_app(settings: Settings | None = None, engine: Engine | None = None,
         eng.set_force_offline(bool(data.get("value", True)))
         return eng.status()
 
-    # --- Open-core placeholders (future modules) ---
-    @app.get("/api/chat")
-    def chat_placeholder():
-        return JSONResponse(chat_stub(), status_code=501)
+    register_chat(app)
+    if messages is None:
+        messages = MessageStore(chat_store=app.state.chat_store)
+    app.state.messages = messages
 
-    # Link previews + minimal messages (own modules; M4 / voice-note PRs should merge carefully).
     register_unfurl_routes(app, unfurl=unfurl, limiter=unfurl_limiter)
     register_message_routes(
         app, store=messages, unfurl=unfurl, limiter=chat_msg_limiter,
@@ -253,8 +249,9 @@ def create_app(settings: Settings | None = None, engine: Engine | None = None,
         hub=app.state.chat_hub,
         translations=app.state.chat_translations,
     )
-    register_chat_ws(app)
+    register_chat_ws(app)  # no-op: register_chat already bound /ws/chat
 
+    # --- Open-core placeholders (future modules) ---
     @app.get("/api/games")
     def games_placeholder():
         return JSONResponse(games_stub(), status_code=501)

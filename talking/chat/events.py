@@ -1,58 +1,22 @@
-"""In-process fan-out for chat events (``message_edited``).
+"""Chat hub helpers. Prefer ``hub.ChatHub``; this module re-exports it.
 
-PR #3 already ships ``talking/chat/hub.py`` + ``/ws/chat``. This module is
-intentionally the same shape: ``subscribe`` / ``unsubscribe`` / ``publish``.
-On merge, keep a single hub on ``app.state.chat_hub`` (prefer PR #3's file)
-and skip registering ``/ws/chat`` a second time — ``register_chat_ws`` is
-idempotent.
+``register_chat_ws`` is idempotent so notes ``register_chat`` can own ``/ws/chat``.
 """
 from __future__ import annotations
 
 import asyncio
 import json
 import logging
-from collections import defaultdict
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 
 from talking.security import unsign
 
+from .hub import ChatHub
+
 log = logging.getLogger(__name__)
 
-
-class ChatHub:
-    def __init__(self) -> None:
-        self._subs: dict[str, set[asyncio.Queue]] = defaultdict(set)
-
-    def subscribe(self, key: str, queue: asyncio.Queue) -> None:
-        self._subs[key].add(queue)
-
-    def unsubscribe(self, key: str, queue: asyncio.Queue) -> None:
-        bucket = self._subs.get(key)
-        if not bucket:
-            return
-        bucket.discard(queue)
-        if not bucket:
-            self._subs.pop(key, None)
-
-    def publish(self, key: str, event: dict) -> None:
-        for q in list(self._subs.get(key) or ()):
-            try:
-                if not q.full():
-                    q.put_nowait(event)
-            except Exception:
-                log.debug("chat hub drop", exc_info=True)
-
-    def publish_edit(self, msg_public: dict) -> None:
-        event = {"type": "message_edited", "message": msg_public}
-        keys = {
-            "*",
-            str(msg_public.get("sender_id") or ""),
-            str(msg_public.get("conversation_id") or msg_public.get("dialog_id") or ""),
-        }
-        for key in keys:
-            if key:
-                self.publish(key, event)
+__all__ = ["ChatHub", "ensure_hub", "register_chat_ws"]
 
 
 def ensure_hub(app: FastAPI) -> ChatHub:
@@ -71,7 +35,7 @@ def _ws_chat_registered(app: FastAPI) -> bool:
 
 
 def register_chat_ws(app: FastAPI) -> None:
-    """``/ws/chat`` — skipped if a notes/M4 PR already registered it."""
+    """``/ws/chat`` — skipped if notes/M4 already registered it."""
     if _ws_chat_registered(app):
         return
     hub = ensure_hub(app)

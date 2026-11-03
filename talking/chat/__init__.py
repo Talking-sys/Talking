@@ -1,26 +1,39 @@
 """Chat module (open core). Full chat is ROADMAP M4.
 
-This PR adds a minimal in-memory text-message model so link previews have
-somewhere to hang, plus Telegram-like text editing. GET /api/chat stays 501.
-See chat/messages.py, chat/edits.py, POST/GET/PATCH /api/chat/messages.
-A parallel voice-note PR may also touch this package — keep edits additive
-(docs/CHAT_EDITING.md).
+Unified after merging notes (PR #3), link previews (PR #5), and edits (PR #6):
+
+- ``store.ChatStore`` — one file-backed Dialog + Message store
+- ``models.Message`` — one model; ``kind`` is canonical, ``type`` is an alias
+- ``hub.ChatHub`` + ``/ws/chat`` — one hub (``events.register_chat_ws`` is a no-op)
+- ``http.py`` keeps ``GET/POST/PATCH /api/chat/messages`` on the same store
+- ``routes.py`` keeps dialog/notes/media paths
+
+Not in this slice: unique nicks, prefix search, groups, block lists, stickers,
+polls, 3-minute auto-delete. See ``docs/CHAT_NOTES.md`` and ``docs/CHAT_EDITING.md``.
 """
 
-from .edits import EditError, apply_text_edit, check_can_edit  # noqa: F401
-from .messages import ChatMessage, MessageStore  # noqa: F401
+STAGE = "notes-slice"
+STATUS = "partial"
+PARTIAL = ["notes", "link_previews", "message_edit"]
 
-STAGE = 1
-STATUS = "planned"
+from .edits import EditError, apply_text_edit, check_can_edit  # noqa: E402,F401
+from .gestures import GestureConfig, RecordGestureMachine  # noqa: E402,F401
+from .messages import ChatMessage, MessageStore  # noqa: E402,F401
 
 
-def not_implemented() -> dict:
+def module_status() -> dict:
     return {
-        "ok": False,
+        "ok": True,
         "module": "chat",
         "stage": STAGE,
         "status": STATUS,
-        "partial": ["link_previews", "message_edit"],
-        "message": "Full chat ships in a later module (see docs/ROADMAP.md). "
-                   "Minimal /api/chat/messages exists for link previews and text edits.",
+        "partial": list(PARTIAL),
+        "feature": "notes",
+        "message": "Notes slice (voice_note / video_note), link previews, and text edits. "
+                   "Full chat is ROADMAP M4.",
     }
+
+
+def not_implemented() -> dict:
+    """Kept so older imports do not break; the notes slice is live."""
+    return module_status()

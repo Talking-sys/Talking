@@ -73,10 +73,10 @@ talking/                 GPL open core package
   buffer.py / offline_queue.py / archive.py
   commands.py / languages.py
   commercial/            HTTP client + stubs (no proprietary code)
-  chat/                  placeholder (M4) + messages.py (link previews + text edit)
+  chat/                  unified store (notes + text + edits); M4 extends this
   unfurl/                SSRF-safe Open Graph / Twitter / oEmbed unfurl + image proxy
   games/                 placeholder (M8)
-  static/                mobile-first HTML/JS (+ link-preview.js / mini-browser)
+  static/                mobile-first HTML/JS (+ chat.html, link-preview.js / mini-browser)
 docs/specs/              owner spec, human contribution evidence
 ```
 
@@ -87,6 +87,6 @@ docs/specs/              owner spec, human contribution evidence
 | 3-minute live buffer | SQLite + WAV on disk | same |
 | Offline queue | JSONL ring, delete after ACK | same |
 | History > 3 min | local JSONL; S3 if `S3_*` set | Cloudflare R2 |
-| Accounts / chat | — | Postgres (Neon / Aurora) |
+| Accounts / chat | file-backed dialogs + notes (`data/chat/`) | Postgres (Neon / Aurora) in M4 |
 | Rate limits / pubsub | in-process | Redis |
 | Link-preview cache | in-process; Redis if `REDIS_URL` | same |

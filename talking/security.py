@@ -124,7 +124,7 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
             response.headers.setdefault("X-Frame-Options", "SAMEORIGIN")
         else:
             response.headers.setdefault("X-Frame-Options", "DENY")
-        response.headers.setdefault("Permissions-Policy", "microphone=(self), camera=(), geolocation=()")
+        response.headers.setdefault("Permissions-Policy", "microphone=(self), camera=(self), geolocation=()")
         if self.production:
             response.headers.setdefault("Strict-Transport-Security", "max-age=15552000")
         return response

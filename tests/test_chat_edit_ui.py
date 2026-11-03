@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 import socket
+import tempfile
 import threading
 
 import pytest
@@ -34,6 +35,7 @@ def live_url():
 
     os.environ.setdefault("APP_TRANSLATE_PROVIDERS", "stub")
     os.environ["UNFURL_STUB"] = "1"
+    os.environ["APP_DATA_DIR"] = tempfile.mkdtemp(prefix="talking-edit-ui-")
     port = _free_port()
     s = Settings()
     tr = Translator(s, providers=[StubProvider()])
