@@ -99,7 +99,7 @@ class Settings:
     redis_url: str = field(default_factory=lambda: _env("REDIS_URL", ""))
 
     # M10 auth. `local` is the single-user home Wi-Fi translator (tests/dev default).
-    # `accounts` enables cookies, CSRF, and phone/anonymous sign-in.
+    # `accounts` enables cookies, CSRF, phone/anonymous, and Apple when configured.
     auth_mode: str = field(default_factory=lambda: _env("AUTH_MODE", "local"))
     public_origin: str = field(default_factory=lambda: _env("PUBLIC_ORIGIN", ""))
     log_salt: str = field(default_factory=lambda: _env("LOG_SALT", ""))
@@ -111,6 +111,18 @@ class Settings:
     twilio_verify_service_sid: str = field(default_factory=lambda: _env("TWILIO_VERIFY_SERVICE_SID", ""))
     sms_country_allowlist: str = field(default_factory=lambda: _env("SMS_COUNTRY_ALLOWLIST", ""))
     sms_default_region: str = field(default_factory=lambda: _env("SMS_DEFAULT_REGION", ""))
+
+    # Sign in with Apple. Feature is off unless every required value is set.
+    # Private key stays in env or a file outside the repo — never commit .p8 / PEM.
+    apple_client_id: str = field(default_factory=lambda: _env("APPLE_CLIENT_ID", ""))
+    apple_team_id: str = field(default_factory=lambda: _env("APPLE_TEAM_ID", ""))
+    apple_key_id: str = field(default_factory=lambda: _env("APPLE_KEY_ID", ""))
+    apple_private_key: str = field(default_factory=lambda: _env("APPLE_PRIVATE_KEY", ""))
+    apple_private_key_file: str = field(default_factory=lambda: _env("APPLE_PRIVATE_KEY_FILE", ""))
+    apple_redirect_uri: str = field(default_factory=lambda: _env("APPLE_REDIRECT_URI", ""))
+    apple_authorize_url: str = field(default_factory=lambda: _env("APPLE_AUTHORIZE_URL", ""))
+    apple_token_url: str = field(default_factory=lambda: _env("APPLE_TOKEN_URL", ""))
+    apple_jwks_url: str = field(default_factory=lambda: _env("APPLE_JWKS_URL", ""))
 
     s3_endpoint: str = field(default_factory=lambda: _env("S3_ENDPOINT", ""))
     s3_bucket: str = field(default_factory=lambda: _env("S3_BUCKET", ""))

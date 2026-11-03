@@ -2,12 +2,15 @@
 from __future__ import annotations
 
 import logging
+from urllib.parse import urlencode
+
 from fastapi import FastAPI, HTTPException, Request, Response
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, RedirectResponse
 
 from talking.db import make_engine, make_session_factory
 from talking.security import client_ip, sign
 
+from .apple import build_apple_client, validate_apple_settings
 from .crypto import (
     ACCESS_COOKIE,
     ACCESS_COOKIE_DEV,
@@ -58,6 +61,7 @@ def validate_auth_settings(settings) -> None:
                 "TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, and TWILIO_VERIFY_SERVICE_SID "
                 "are required when APP_ENV=production"
             )
+    validate_apple_settings(settings)
 
 
 def _https_request(request: Request) -> bool:
@@ -120,6 +124,7 @@ def build_auth_stack(settings, secret: bytes):
     svc = AuthService(
         store, secret=secret, log_salt=salt, enc_key=enc,
         phone_provider=build_phone_provider(settings),
+        apple=build_apple_client(settings),
         sign_fn=sign, allow_debug_otp=allow_debug,
     )
     limiter = AuthRateLimiter(settings.redis_url)
@@ -329,6 +334,98 @@ def register_auth(app: FastAPI) -> None:
         except AuthError as e:
             raise _err(e)
 
+    @app.get("/api/auth/providers")
+    async def auth_providers():
+        return {
+            "providers": {
+                "anonymous": True,
+                "phone": True,
+                "apple": svc.apple_enabled(),
+                "google": False,
+                "email": False,
+                "passkey": False,
+            }
+        }
+
+    @app.api_route("/api/auth/apple/start", methods=["GET", "POST"])
+    async def apple_start(request: Request):
+        if (s.auth_mode or "local").strip().lower() != "accounts":
+            raise HTTPException(400, "accounts_only")
+        ip = client_ip(request)
+        if not limiter.allow(f"auth:apple:ip:{ip}", 10, 3600):
+            raise HTTPException(429, "rate limit")
+        intent = "signin"
+        if request.method == "POST":
+            data = await _json(request)
+            intent = str(data.get("intent") or request.query_params.get("intent") or "signin")
+        else:
+            intent = str(request.query_params.get("intent") or "signin")
+        uid = None
+        if intent == "link":
+            if request.method != "POST":
+                raise HTTPException(405, "link_requires_post")
+            user = require_user(request)
+            if user.auth_mode == "local":
+                raise HTTPException(400, "accounts_only")
+            uid = user.id
+        try:
+            out = await svc.start_apple(intent=intent, user_id=uid, ip=ip)
+        except AuthError as e:
+            raise _err(e)
+        if _wants_json(request):
+            return {"ok": True, "url": out["url"], "intent": out["intent"]}
+        return RedirectResponse(out["url"], status_code=302)
+
+    @app.api_route("/api/auth/apple/callback", methods=["GET", "POST"])
+    async def apple_callback(request: Request):
+        if (s.auth_mode or "local").strip().lower() != "accounts":
+            raise HTTPException(400, "accounts_only")
+        form = await _apple_callback_payload(request)
+        if form.get("error"):
+            return _apple_fail(request, AuthError(401, str(form.get("error") or "apple_denied")))
+        ip = client_ip(request)
+        if not limiter.allow(f"auth:apple:cb:{ip}", 30, 3600):
+            raise HTTPException(429, "rate limit")
+        user = getattr(request.state, "user", None)
+        current = user.user if user and user.authenticated and user.auth_mode == "accounts" else None
+        session = user.session if user and user.authenticated else None
+        try:
+            out = await svc.complete_apple(
+                code=str(form.get("code") or ""),
+                state=str(form.get("state") or ""),
+                user_form=form.get("user"),
+                current_user=current,
+                session=session,
+                ip=ip,
+                user_agent=request.headers.get("user-agent"),
+            )
+        except AuthError as e:
+            return _apple_fail(request, e)
+        if out.get("link"):
+            if _wants_json(request):
+                return out
+            return RedirectResponse(_apple_return_url(request, "linked"), status_code=303)
+        if _wants_json(request):
+            return attach_session_response(request, out)
+        dest = _apple_return_url(request, "ok")
+        resp = RedirectResponse(dest, status_code=303)
+        set_session_cookies(resp, request, svc.access_token(out["session"]), out["refresh"])
+        return resp
+
+    @app.post("/api/auth/apple/notifications")
+    async def apple_notifications(request: Request):
+        ip = client_ip(request)
+        if not limiter.allow(f"auth:apple:note:{ip}", 60, 3600):
+            raise HTTPException(429, "rate limit")
+        token = await _apple_notification_jwt(request)
+        try:
+            out = await svc.handle_apple_notification(token)
+        except AuthError as e:
+            raise _err(e)
+        for uid in out.get("close_users") or []:
+            await app.state.auth_sockets.close_user(uid)
+        return {"ok": True, "handled": out.get("handled", 0)}
+
 
 async def _json(request: Request) -> dict:
     if not (request.headers.get("content-type") or "").startswith("application/json"):
@@ -340,5 +437,58 @@ async def _json(request: Request) -> dict:
     if not isinstance(data, dict):
         raise HTTPException(400, "invalid JSON")
     return data
+
+
+def _wants_json(request: Request) -> bool:
+    accept = (request.headers.get("accept") or "").lower()
+    if "application/json" in accept:
+        return True
+    return request.query_params.get("format") == "json"
+
+
+def _apple_return_url(request: Request, status: str, error: str | None = None) -> str:
+    origin = (request.app.state.settings.public_origin or "").strip().rstrip("/")
+    params = {"auth": status}
+    if error:
+        params["auth_error"] = error
+    qs = urlencode(params)
+    if origin:
+        return f"{origin}/?{qs}"
+    return f"/?{qs}"
+
+
+def _apple_fail(request: Request, exc: AuthError):
+    if _wants_json(request):
+        return JSONResponse({"detail": exc.code}, status_code=exc.status)
+    return RedirectResponse(_apple_return_url(request, "error", exc.code), status_code=303)
+
+
+async def _apple_callback_payload(request: Request) -> dict:
+    if request.method == "GET":
+        return {k: v for k, v in request.query_params.items()}
+    ct = (request.headers.get("content-type") or "").lower()
+    if "application/json" in ct:
+        return await _json(request)
+    try:
+        form = await request.form()
+    except Exception:
+        return {}
+    return {str(k): form.get(k) for k in form.keys()}
+
+
+async def _apple_notification_jwt(request: Request) -> str:
+    ct = (request.headers.get("content-type") or "").lower()
+    if "application/json" in ct:
+        data = await _json(request)
+        return str(data.get("payload") or data.get("signedPayload") or "")
+    try:
+        form = await request.form()
+        token = form.get("payload") or form.get("signedPayload")
+        if token:
+            return str(token)
+    except Exception:
+        pass
+    raw = (await request.body()).decode("utf-8", errors="ignore").strip()
+    return raw.strip('"')
 
 
