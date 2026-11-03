@@ -95,3 +95,21 @@ class ChallengeRecord:
     consumed_at: datetime | None = None
     ip_hash: str | None = None
     user_id: str | None = None
+
+
+@dataclass
+class CredentialRecord:
+    id: str
+    user_id: str
+    identity_id: str
+    credential_id: bytes
+    public_key: bytes
+    sign_count: int = 0
+    transports: list[str] | None = None
+    aaguid: str | None = None
+    backup_eligible: bool = False
+    backup_state: bool = False
+    device_label: str | None = None
+    cloned_at: datetime | None = None
+    created_at: datetime = field(default_factory=_now)
+    last_used_at: datetime | None = None

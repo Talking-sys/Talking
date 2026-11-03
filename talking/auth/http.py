@@ -18,6 +18,7 @@ from .crypto import (
     load_encryption_key,
     phone_subject,
 )
+from .passkey import PasskeyError, rp_from_settings
 from .deps import AuthMiddleware, read_refresh_cookie, require_user
 from .logfilter import install_auth_log_filter
 from .phone_util import PhoneError, country_allowed, normalize_phone_channel, parse_e164
@@ -328,6 +329,89 @@ def register_auth(app: FastAPI) -> None:
             )
         except AuthError as e:
             raise _err(e)
+
+    @app.post("/api/auth/passkey/register/options")
+    async def passkey_register_options(request: Request):
+        user = require_user(request)
+        if user.auth_mode == "local":
+            raise HTTPException(400, "accounts_only")
+        if user.user is None or user.session is None:
+            raise HTTPException(401, "not signed in")
+        ip = client_ip(request)
+        if not limiter.allow(f"auth:passkey:reg:{user.id}", 10, 3600):
+            raise HTTPException(429, "rate limit")
+        try:
+            rp_id, origin = rp_from_settings(s, request)
+            return await svc.passkey_register_options(
+                user.user, user.session, rp_id=rp_id, rp_name=s.app_name,
+                origin=origin, ip=ip,
+            )
+        except PasskeyError as e:
+            raise HTTPException(400, e.code)
+        except AuthError as e:
+            raise _err(e)
+
+    @app.post("/api/auth/passkey/register")
+    async def passkey_register(request: Request):
+        user = require_user(request)
+        if user.auth_mode == "local":
+            raise HTTPException(400, "accounts_only")
+        if user.user is None or user.session is None:
+            raise HTTPException(401, "not signed in")
+        ip = client_ip(request)
+        if not limiter.allow(f"auth:passkey:regfin:{user.id}", 10, 3600):
+            raise HTTPException(429, "rate limit")
+        data = await _json(request)
+        try:
+            rp_id, origin = rp_from_settings(s, request)
+            return await svc.passkey_register(
+                user.user, user.session,
+                challenge_id=str(data.get("challenge_id") or ""),
+                credential=data.get("credential") if isinstance(data.get("credential"), dict) else {},
+                rp_id=rp_id, origin=origin, ip=ip,
+                user_agent=request.headers.get("user-agent"),
+            )
+        except PasskeyError as e:
+            raise HTTPException(400, e.code)
+        except AuthError as e:
+            raise _err(e)
+
+    @app.post("/api/auth/passkey/authenticate/options")
+    async def passkey_authenticate_options(request: Request):
+        if (s.auth_mode or "local").strip().lower() != "accounts":
+            raise HTTPException(400, "accounts_only")
+        ip = client_ip(request)
+        if not limiter.allow(f"auth:passkey:auth:{ip}", 20, 3600):
+            raise HTTPException(429, "rate limit")
+        try:
+            rp_id, origin = rp_from_settings(s, request)
+            return await svc.passkey_authenticate_options(rp_id=rp_id, origin=origin, ip=ip)
+        except PasskeyError as e:
+            raise HTTPException(400, e.code)
+        except AuthError as e:
+            raise _err(e)
+
+    @app.post("/api/auth/passkey/authenticate")
+    async def passkey_authenticate(request: Request):
+        if (s.auth_mode or "local").strip().lower() != "accounts":
+            raise HTTPException(400, "accounts_only")
+        ip = client_ip(request)
+        if not limiter.allow(f"auth:passkey:authfin:{ip}", 20, 3600):
+            raise HTTPException(429, "rate limit")
+        data = await _json(request)
+        try:
+            rp_id, origin = rp_from_settings(s, request)
+            out = await svc.passkey_authenticate(
+                challenge_id=str(data.get("challenge_id") or ""),
+                credential=data.get("credential") if isinstance(data.get("credential"), dict) else {},
+                rp_id=rp_id, origin=origin, ip=ip,
+                user_agent=request.headers.get("user-agent"),
+            )
+        except PasskeyError as e:
+            raise HTTPException(400, e.code)
+        except AuthError as e:
+            raise _err(e)
+        return attach_session_response(request, out)
 
 
 async def _json(request: Request) -> dict:

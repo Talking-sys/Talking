@@ -1,9 +1,11 @@
-"""Session, anonymous, recovery, and phone auth operations."""
+"""Session, anonymous, recovery, phone, and passkey auth operations."""
 from __future__ import annotations
 
 import logging
 from datetime import timedelta
 from typing import Any
+
+from webauthn.helpers import bytes_to_base64url, generate_challenge
 
 from .crypto import (
     ACCESS_TTL_S,
@@ -11,20 +13,37 @@ from .crypto import (
     FRESH_AUTH_S,
     PHONE_OTP_TTL_S,
     REFRESH_TTL_S,
+    WEBAUTHN_CHALLENGE_TTL_S,
     encrypt_pii,
     hash_token,
     ip_hash,
     new_id,
     new_recovery_code,
     new_refresh_token,
+    passkey_subject,
     phone_subject,
     user_log_id,
     utcnow,
+)
+from .passkey import (
+    KIND_AUTH,
+    KIND_REGISTER,
+    PASSKEY_PROVIDER,
+    PasskeyError,
+    authentication_options,
+    challenge_hash,
+    credential_id_from,
+    registration_options,
+    transports_from,
+    user_handle,
+    verify_authentication,
+    verify_registration,
 )
 from .providers import PhoneProvider, StartResult
 from .storage import AuthStorage
 from .types import (
     ChallengeRecord,
+    CredentialRecord,
     IdentityRecord,
     RecoveryRecord,
     SessionRecord,
@@ -249,10 +268,18 @@ class AuthService:
 
     async def public_methods(self, user_id: str) -> list[dict]:
         rows = await self.store.list_identities(user_id)
-        return [
-            {"id": i.id, "provider": i.provider, "created_at": i.created_at.isoformat()}
-            for i in rows
-        ]
+        creds = {c.identity_id: c for c in await self.store.list_credentials(user_id)}
+        out = []
+        for ident in rows:
+            item = {"id": ident.id, "provider": ident.provider, "created_at": ident.created_at.isoformat()}
+            cred = creds.get(ident.id)
+            if cred is not None:
+                if cred.device_label:
+                    item["label"] = cred.device_label
+                if cred.cloned_at is not None:
+                    item["cloned"] = True
+            out.append(item)
+        return out
 
     # --- phone ---
 
@@ -374,5 +401,243 @@ class AuthService:
         methods = await self.store.list_identities(user_id)
         if len(methods) <= 1:
             raise AuthError(400, "last_method")
+        if ident.provider == PASSKEY_PROVIDER:
+            await self.store.delete_credential_by_identity(ident_id)
         await self.store.delete_identity(ident_id)
         await self._event("method_unlink", user_id=user_id, provider=ident.provider)
+
+    # --- passkeys / WebAuthn ---
+
+    async def _store_webauthn_challenge(
+        self,
+        *,
+        kind: str,
+        challenge: bytes,
+        ip: str | None,
+        user_id: str | None,
+        origin: str,
+    ) -> ChallengeRecord:
+        ch = ChallengeRecord(
+            id=new_id(),
+            kind=kind,
+            subject_hash=hash_token(f"{kind}:{origin}:{user_id or ''}"),
+            channel="webauthn",
+            provider=PASSKEY_PROVIDER,
+            provider_ref=bytes_to_base64url(challenge),
+            code_hash=challenge_hash(challenge),
+            expires_at=utcnow() + timedelta(seconds=WEBAUTHN_CHALLENGE_TTL_S),
+            ip_hash=ip_hash(self.log_salt, ip) if ip else None,
+            user_id=user_id,
+            max_attempts=5,
+        )
+        await self.store.create_challenge(ch)
+        return ch
+
+    async def _load_webauthn_challenge(self, challenge_id: str, kind: str) -> tuple[ChallengeRecord, bytes]:
+        from webauthn.helpers import base64url_to_bytes
+        ch = await self.store.get_challenge(challenge_id)
+        if ch is None or ch.kind != kind:
+            raise AuthError(400, "invalid_challenge")
+        if ch.consumed_at is not None:
+            raise AuthError(400, "invalid_challenge")
+        if ch.expires_at < utcnow():
+            raise AuthError(400, "challenge_expired")
+        if ch.attempts >= ch.max_attempts:
+            raise AuthError(429, "attempts_exhausted")
+        try:
+            challenge = base64url_to_bytes(ch.provider_ref or "")
+        except Exception:
+            raise AuthError(400, "invalid_challenge")
+        if not challenge or challenge_hash(challenge) != (ch.code_hash or ""):
+            raise AuthError(400, "invalid_challenge")
+        return ch, challenge
+
+    async def _touch_challenge(self, ch: ChallengeRecord, *, consume: bool) -> None:
+        ch.attempts += 1
+        if consume:
+            ch.consumed_at = utcnow()
+        await self.store.save_challenge(ch)
+
+    async def passkey_register_options(
+        self,
+        user: UserRecord,
+        session: SessionRecord,
+        *,
+        rp_id: str,
+        rp_name: str,
+        origin: str,
+        ip: str | None = None,
+    ) -> dict:
+        if not self.session_is_fresh(session):
+            raise AuthError(403, "fresh_session_required")
+        existing = await self.store.list_credentials(user.id)
+        challenge = generate_challenge()
+        ch = await self._store_webauthn_challenge(
+            kind=KIND_REGISTER, challenge=challenge, ip=ip, user_id=user.id, origin=origin,
+        )
+        public_key = registration_options(
+            rp_id=rp_id,
+            rp_name=rp_name,
+            user_id=user.id,
+            user_name=user.nickname or "talking-user",
+            existing=existing,
+            challenge=challenge,
+        )
+        await self._event("passkey_register_start", user_id=user.id, ip=ip)
+        return {
+            "challenge_id": ch.id,
+            "expires_in": WEBAUTHN_CHALLENGE_TTL_S,
+            "publicKey": public_key,
+        }
+
+    async def passkey_register(
+        self,
+        user: UserRecord,
+        session: SessionRecord,
+        *,
+        challenge_id: str,
+        credential: dict,
+        rp_id: str,
+        origin: str,
+        ip: str | None = None,
+        user_agent: str | None = None,
+    ) -> dict:
+        if not self.session_is_fresh(session):
+            raise AuthError(403, "fresh_session_required")
+        if not isinstance(credential, dict):
+            raise AuthError(400, "invalid_passkey")
+        ch, challenge = await self._load_webauthn_challenge(challenge_id, KIND_REGISTER)
+        if ch.user_id != user.id:
+            raise AuthError(400, "invalid_challenge")
+        try:
+            verification = verify_registration(
+                credential, challenge=challenge, rp_id=rp_id, origin=origin,
+            )
+        except PasskeyError as exc:
+            await self._touch_challenge(ch, consume=ch.attempts + 1 >= ch.max_attempts)
+            raise AuthError(401, exc.code)
+        cred_id = verification.credential_id
+        taken = await self.store.get_credential_by_credential_id(cred_id)
+        if taken is not None:
+            await self._touch_challenge(ch, consume=True)
+            raise AuthError(409, "passkey_taken")
+        ident = IdentityRecord(
+            id=new_id(), user_id=user.id, provider=PASSKEY_PROVIDER,
+            subject=passkey_subject(self.log_salt, cred_id),
+        )
+        rec = CredentialRecord(
+            id=new_id(), user_id=user.id, identity_id=ident.id,
+            credential_id=cred_id, public_key=verification.credential_public_key,
+            sign_count=int(verification.sign_count or 0),
+            transports=transports_from(credential),
+            aaguid=(verification.aaguid or None),
+            backup_eligible=bool(getattr(verification, "credential_backed_up", False)),
+            backup_state=bool(getattr(verification, "credential_backed_up", False)),
+            device_label=self._device(user_agent),
+        )
+        try:
+            await self.store.create_identity(ident)
+            await self.store.create_credential(rec)
+        except ValueError:
+            await self.store.delete_identity(ident.id)
+            await self._touch_challenge(ch, consume=True)
+            raise AuthError(409, "passkey_taken")
+        await self._touch_challenge(ch, consume=True)
+        await self._event("passkey_register", user_id=user.id, ip=ip)
+        log.info("passkey registered user=%s", self.uid_log(user.id))
+        return {
+            "ok": True,
+            "method": {
+                "id": ident.id,
+                "provider": PASSKEY_PROVIDER,
+                "created_at": ident.created_at.isoformat(),
+                **({"label": rec.device_label} if rec.device_label else {}),
+            },
+        }
+
+    async def passkey_authenticate_options(
+        self, *, rp_id: str, origin: str, ip: str | None = None,
+    ) -> dict:
+        challenge = generate_challenge()
+        ch = await self._store_webauthn_challenge(
+            kind=KIND_AUTH, challenge=challenge, ip=ip, user_id=None, origin=origin,
+        )
+        return {
+            "challenge_id": ch.id,
+            "expires_in": WEBAUTHN_CHALLENGE_TTL_S,
+            "publicKey": authentication_options(rp_id=rp_id, challenge=challenge),
+        }
+
+    async def passkey_authenticate(
+        self,
+        *,
+        challenge_id: str,
+        credential: dict,
+        rp_id: str,
+        origin: str,
+        ip: str | None = None,
+        user_agent: str | None = None,
+    ) -> dict:
+        if not isinstance(credential, dict):
+            raise AuthError(400, "invalid_passkey")
+        ch, challenge = await self._load_webauthn_challenge(challenge_id, KIND_AUTH)
+        cred_id = credential_id_from(credential)
+        if cred_id is None:
+            await self._touch_challenge(ch, consume=ch.attempts + 1 >= ch.max_attempts)
+            raise AuthError(401, "invalid_passkey")
+        rec = await self.store.get_credential_by_credential_id(cred_id)
+        if rec is None:
+            await self._touch_challenge(ch, consume=ch.attempts + 1 >= ch.max_attempts)
+            raise AuthError(401, "invalid_passkey")
+        if rec.cloned_at is not None:
+            await self._touch_challenge(ch, consume=True)
+            raise AuthError(401, "cloned_credential")
+        try:
+            verification = verify_authentication(
+                credential,
+                challenge=challenge,
+                rp_id=rp_id,
+                origin=origin,
+                public_key=rec.public_key,
+                sign_count=rec.sign_count,
+            )
+        except PasskeyError as exc:
+            consume = exc.cloned or ch.attempts + 1 >= ch.max_attempts
+            if exc.cloned:
+                rec.cloned_at = utcnow()
+                await self.store.save_credential(rec)
+                await self._event("passkey_clone", user_id=rec.user_id, ip=ip)
+                log.info("passkey clone user=%s", self.uid_log(rec.user_id))
+            await self._touch_challenge(ch, consume=consume)
+            raise AuthError(401, exc.code)
+        new_count = int(verification.new_sign_count or 0)
+        if (new_count > 0 or rec.sign_count > 0) and new_count <= rec.sign_count:
+            rec.cloned_at = utcnow()
+            await self.store.save_credential(rec)
+            await self._touch_challenge(ch, consume=True)
+            await self._event("passkey_clone", user_id=rec.user_id, ip=ip)
+            log.info("passkey clone user=%s", self.uid_log(rec.user_id))
+            raise AuthError(401, "cloned_credential")
+        handle = credential.get("response", {}).get("userHandle") if isinstance(credential.get("response"), dict) else None
+        if handle:
+            from webauthn.helpers import base64url_to_bytes
+            try:
+                raw_handle = base64url_to_bytes(handle) if isinstance(handle, str) else b""
+            except Exception:
+                raw_handle = b""
+            if raw_handle and raw_handle != user_handle(rec.user_id):
+                await self._touch_challenge(ch, consume=ch.attempts + 1 >= ch.max_attempts)
+                raise AuthError(401, "invalid_passkey")
+        user = await self.store.get_user(rec.user_id)
+        if user is None or user.status != "active":
+            await self._touch_challenge(ch, consume=True)
+            raise AuthError(401, "invalid_passkey")
+        rec.sign_count = new_count
+        rec.last_used_at = utcnow()
+        rec.backup_state = bool(getattr(verification, "credential_backed_up", rec.backup_state))
+        await self.store.save_credential(rec)
+        await self._touch_challenge(ch, consume=True)
+        sess, refresh = await self.issue_session(user.id, ip=ip, user_agent=user_agent)
+        await self._event("passkey_authenticate", user_id=user.id, ip=ip)
+        log.info("passkey sign-in user=%s", self.uid_log(user.id))
+        return {"user": self.public_user(user), "session": sess, "refresh": refresh}

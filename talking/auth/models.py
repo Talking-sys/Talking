@@ -4,7 +4,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint
+from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, LargeBinary, String, Text, UniqueConstraint
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
@@ -31,6 +31,7 @@ class User(Base):
 
     identities: Mapped[list[Identity]] = relationship(back_populates="user")
     sessions: Mapped[list[Session]] = relationship(back_populates="user")
+    credentials: Mapped[list["WebAuthnCredential"]] = relationship(back_populates="user")
 
 
 class Identity(Base):
@@ -39,7 +40,7 @@ class Identity(Base):
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     user_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False, index=True)
-    provider: Mapped[str] = mapped_column(String(32), nullable=False)  # anonymous | phone | google | apple | email
+    provider: Mapped[str] = mapped_column(String(32), nullable=False)  # anonymous | phone | passkey | google | apple | email
     subject: Mapped[str] = mapped_column(String(128), nullable=False)
     email_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
     email_enc: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -109,3 +110,26 @@ class LoginChallenge(Base):
     consumed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     ip_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
     user_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+
+
+class WebAuthnCredential(Base):
+    __tablename__ = "webauthn_credentials"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False, index=True)
+    identity_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("identities.id", ondelete="CASCADE"), nullable=False, unique=True,
+    )
+    credential_id: Mapped[bytes] = mapped_column(LargeBinary, nullable=False, unique=True)
+    public_key: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    sign_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    transports: Mapped[list | None] = mapped_column(JSONB, nullable=True)
+    aaguid: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    backup_eligible: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    backup_state: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    device_label: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    cloned_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, nullable=False)
+    last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    user: Mapped[User] = relationship(back_populates="credentials")

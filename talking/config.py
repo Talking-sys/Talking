@@ -99,8 +99,9 @@ class Settings:
     redis_url: str = field(default_factory=lambda: _env("REDIS_URL", ""))
 
     # M10 auth. `local` is the single-user home Wi-Fi translator (tests/dev default).
-    # `accounts` enables cookies, CSRF, and phone/anonymous sign-in.
+    # `accounts` enables cookies, CSRF, phone/anonymous/passkey sign-in.
     auth_mode: str = field(default_factory=lambda: _env("AUTH_MODE", "local"))
+    # Site origin and WebAuthn RP origin (hostname = RP ID).
     public_origin: str = field(default_factory=lambda: _env("PUBLIC_ORIGIN", ""))
     log_salt: str = field(default_factory=lambda: _env("LOG_SALT", ""))
     db_encryption_key: str = field(default_factory=lambda: _env("DB_ENCRYPTION_KEY", ""))

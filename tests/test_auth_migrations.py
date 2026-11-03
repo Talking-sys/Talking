@@ -52,14 +52,54 @@ def test_migrations_up_down():
             names = {r["tablename"] for r in tables}
             for expected in (
                 "users", "identities", "sessions", "recovery_codes",
-                "auth_events", "login_challenges", "alembic_version",
+                "auth_events", "login_challenges", "webauthn_credentials",
+                "alembic_version",
             ):
                 assert expected in names, names
             comment = await conn.fetchval(
                 "SELECT obj_description('auth_events'::regclass)"
             )
             assert comment and "90" in comment
+            pk_comment = await conn.fetchval(
+                "SELECT obj_description('webauthn_credentials'::regclass)"
+            )
+            assert pk_comment and "Passkey" in pk_comment
         finally:
             await conn.close()
 
     asyncio.run(check())
+
+    from talking.auth.crypto import new_id
+    from talking.auth.storage import PostgresAuthStorage
+    from talking.auth.types import CredentialRecord, IdentityRecord, UserRecord
+    from talking.db import make_engine, make_session_factory
+
+    engine = make_engine(url)
+    store = PostgresAuthStorage(make_session_factory(engine))
+
+    async def roundtrip():
+        user = UserRecord(id=new_id())
+        await store.create_user(user)
+        ident = IdentityRecord(
+            id=new_id(), user_id=user.id, provider="passkey", subject="abc" * 10,
+        )
+        await store.create_identity(ident)
+        cred = CredentialRecord(
+            id=new_id(), user_id=user.id, identity_id=ident.id,
+            credential_id=b"cred-bytes-example-0001", public_key=b"\x01\x02cose",
+            sign_count=3, transports=["internal"], aaguid="0" * 36,
+        )
+        await store.create_credential(cred)
+        found = await store.get_credential_by_credential_id(b"cred-bytes-example-0001")
+        assert found is not None
+        assert found.sign_count == 3
+        assert found.identity_id == ident.id
+        found.sign_count = 4
+        await store.save_credential(found)
+        listed = await store.list_credentials(user.id)
+        assert listed[0].sign_count == 4
+        await store.delete_identity(ident.id)
+        assert await store.get_credential_by_identity_id(ident.id) is None
+        await engine.dispose()
+
+    asyncio.run(roundtrip())

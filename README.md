@@ -60,8 +60,8 @@ Compose sets `DATABASE_URL` and `REDIS_URL`. The app still runs if those pings f
 | `APP_TTS` / `APP_TTS_PROVIDERS` | off / empty | Default = browser. Set `gtts` for MIT server TTS |
 | `DATABASE_URL` | empty | Postgres/Neon. Empty = local files. Required for `AUTH_MODE=accounts` in production |
 | `REDIS_URL` | empty | Optional. Unfurl cache and auth rate limits use Redis when set, else in-memory |
-| `AUTH_MODE` | `local` | `local` = single-user (dev/tests). `accounts` = cookies + CSRF. Refused in production if `local` |
-| `PUBLIC_ORIGIN` | empty | Canonical https origin; CORS credentials allowlist with `APP_CORS_ORIGINS` |
+| `AUTH_MODE` | `local` | `local` = single-user (dev/tests). `accounts` = cookies + CSRF + phone/passkeys. Refused in production if `local` |
+| `PUBLIC_ORIGIN` | empty | Canonical https origin; CORS credentials allowlist with `APP_CORS_ORIGINS`; WebAuthn RP origin |
 | `LOG_SALT` | empty | HMAC salt for user ids in logs. Required in production |
 | `DB_ENCRYPTION_KEY` | empty | AES-GCM for phone (and later email) at rest |
 | `SMS_PROVIDER` | `console` | `console` = local/dev sink only (refused in production). `twilio` = Verify SMS (voice is explicit fallback). See `docs/AUTH.md` |

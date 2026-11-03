@@ -16,6 +16,8 @@ ACCESS_TTL_S = 15 * 60
 REFRESH_TTL_S = 30 * 24 * 3600
 RECOVERY_TTL_S = 0  # recovery codes do not expire; they are single-use
 PHONE_OTP_TTL_S = 10 * 60
+WEBAUTHN_CHALLENGE_TTL_S = 2 * 60
+WEBAUTHN_TIMEOUT_MS = 60_000
 WS_TOKEN_TTL_S = 60
 WS_TOKEN_TTL_LOCAL_S = 3600
 FRESH_AUTH_S = 10 * 60
@@ -47,6 +49,11 @@ def hmac_hex(secret: bytes, value: str, *, n: int = 32) -> str:
 
 def phone_subject(secret: bytes, phone_e164: str) -> str:
     return hmac.new(secret, f"phone:{phone_e164}".encode("utf-8"), hashlib.sha256).hexdigest()
+
+
+def passkey_subject(secret: bytes, credential_id: bytes) -> str:
+    """HMAC of the credential id for identities.subject (never store the raw id there)."""
+    return hmac.new(secret, b"passkey:" + credential_id, hashlib.sha256).hexdigest()
 
 
 def ip_hash(secret: bytes, ip: str) -> str:
