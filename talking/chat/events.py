@@ -57,7 +57,6 @@ def register_chat_ws(app: FastAPI) -> None:
         app.state.auth_sockets.add(ws, uid, ctx.session_id)
         q: asyncio.Queue = asyncio.Queue(maxsize=200)
         hub.subscribe(uid, q)
-        hub.subscribe("*", q)
 
         async def sender():
             while True:
@@ -85,5 +84,4 @@ def register_chat_ws(app: FastAPI) -> None:
         finally:
             app.state.auth_sockets.discard(ws)
             hub.unsubscribe(uid, q)
-            hub.unsubscribe("*", q)
             send_task.cancel()
