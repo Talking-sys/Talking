@@ -107,7 +107,7 @@ def test_chat_placeholder_still_501(make_client):
     c = make_client()
     r = c.get("/api/chat")
     assert r.status_code == 501
-    assert r.json()["partial"] == ["link_previews"]
+    assert r.json()["partial"] == ["link_previews", "message_edit"]
 
 
 def test_privacy_mentions_unfurl(make_client):

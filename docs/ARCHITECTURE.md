@@ -73,7 +73,7 @@ talking/                 GPL open core package
   buffer.py / offline_queue.py / archive.py
   commands.py / languages.py
   commercial/            HTTP client + stubs (no proprietary code)
-  chat/                  placeholder (M4) + minimal messages.py for link previews
+  chat/                  placeholder (M4) + messages.py (link previews + text edit)
   unfurl/                SSRF-safe Open Graph / Twitter / oEmbed unfurl + image proxy
   games/                 placeholder (M8)
   static/                mobile-first HTML/JS (+ link-preview.js / mini-browser)

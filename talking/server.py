@@ -13,8 +13,10 @@ from fastapi.staticfiles import StaticFiles
 
 from . import __version__
 from .chat import not_implemented as chat_stub
+from .chat.events import ensure_hub, register_chat_ws
 from .chat.http import register_message_routes
 from .chat.messages import MessageStore
+from .chat.translation_cache import MessageTranslationCache
 from .commercial.client import verify_webhook
 from .config import Settings, WHISPER_MODELS
 from .engine import Engine
@@ -65,10 +67,12 @@ def create_app(settings: Settings | None = None, engine: Engine | None = None,
     messages = messages or MessageStore()
     app.state.unfurl = unfurl
     app.state.messages = messages
+    app.state.chat_translations = MessageTranslationCache()
+    ensure_hub(app)
 
     origins = [o.strip() for o in s.cors_origins.split(",") if o.strip()]
     if origins:
-        app.add_middleware(CORSMiddleware, allow_origins=origins, allow_methods=["GET", "POST"],
+        app.add_middleware(CORSMiddleware, allow_origins=origins, allow_methods=["GET", "POST", "PATCH"],
                            allow_headers=["Content-Type"], allow_credentials=True, max_age=600)
     app.add_middleware(SecurityHeadersMiddleware, production=s.production)
     app.mount("/static", StaticFiles(directory=STATIC), name="static")
@@ -77,6 +81,8 @@ def create_app(settings: Settings | None = None, engine: Engine | None = None,
     api_limiter = TokenBucket(s.rate_limit_per_min)
     unfurl_limiter = TokenBucket(s.unfurl_rate_per_min)
     chat_msg_limiter = TokenBucket(s.chat_msg_rate_per_min)
+    chat_edit_limiter = TokenBucket(s.chat_edit_rate_per_min)
+    app.state.chat_edit_limiter = chat_edit_limiter
 
     def _limit(request: Request):
         if not api_limiter.allow(client_ip(request)):
@@ -241,7 +247,13 @@ def create_app(settings: Settings | None = None, engine: Engine | None = None,
 
     # Link previews + minimal messages (own modules; M4 / voice-note PRs should merge carefully).
     register_unfurl_routes(app, unfurl=unfurl, limiter=unfurl_limiter)
-    register_message_routes(app, store=messages, unfurl=unfurl, limiter=chat_msg_limiter)
+    register_message_routes(
+        app, store=messages, unfurl=unfurl, limiter=chat_msg_limiter,
+        edit_limiter=chat_edit_limiter,
+        hub=app.state.chat_hub,
+        translations=app.state.chat_translations,
+    )
+    register_chat_ws(app)
 
     @app.get("/api/games")
     def games_placeholder():

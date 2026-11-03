@@ -80,12 +80,16 @@ class TokenBucket:
 
     def allow(self, key: str) -> bool:
         now = time.time()
-        last = self._ts[key]
-        self._tokens[key] = min(self.burst, self._tokens[key] + (now - last) * self.rate)
+        # Use .get(..., now) so the first hit is not charged a negative dt
+        # (defaultdict(time.time) was evaluated *after* `now`, which made
+        # burst=1 fail the opening request).
+        last = self._ts.get(key, now)
+        tokens = min(self.burst, self._tokens.get(key, float(self.burst)) + max(0.0, now - last) * self.rate)
         self._ts[key] = now
-        if self._tokens[key] >= 1:
-            self._tokens[key] -= 1
+        if tokens >= 1:
+            self._tokens[key] = tokens - 1
             return True
+        self._tokens[key] = tokens
         return False
 
 
