@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="theme-color" content="#0b1220">
+  <title>{{APP_NAME}} — голос</title>
+  <link rel="icon" href="/static/logo.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/static/app.css">
+  <link rel="stylesheet" href="/static/chat.css">
+  <link rel="stylesheet" href="/static/translate.css">
+</head>
+<body class="translate-page">
+  <header class="top">
+    <a class="back" href="/" aria-label="Назад">←</a>
+    <img class="logo" src="/static/logo.svg" alt="">
+    <div class="brand">
+      <strong id="hdrTitle">Голосовой перевод</strong>
+      <small id="net">…</small>
+    </div>
+    <button id="langSwitch" type="button" class="nav-chat" aria-label="Language">EN</button>
+    <a class="nav-chat" href="/chat" id="navChat">Чат</a>
+  </header>
+
+  <main>
+    <div class="mode-toggle" role="tablist" aria-label="Режим">
+      <button type="button" id="modeLive" class="mode-btn is-on" role="tab" aria-selected="true" data-mode="live">Живой перевод</button>
+      <button type="button" id="modeRecord" class="mode-btn" role="tab" aria-selected="false" data-mode="record">Запись</button>
+    </div>
+
+    <section class="card langs" aria-label="Языки">
+      <label class="field">
+        <span id="lblSource">Исходный</span>
+        <select id="source" aria-label="Исходный язык"></select>
+      </label>
+      <button type="button" id="swap" class="swap-btn" aria-label="Поменять языки">⇄</button>
+      <label class="field">
+        <span id="lblTarget">Перевод на</span>
+        <select id="target" aria-label="Язык перевода"></select>
+      </label>
+    </section>
+
+    <section class="live-panel" aria-live="polite">
+      <p id="empty" class="empty">Удерживайте кнопку и говорите. Текст и перевод появятся здесь.</p>
+      <div id="current" class="turn is-partial" hidden>
+        <div class="turn-meta">
+          <span class="speaker" id="curSpeaker">A</span>
+          <span class="pair" id="curPair"></span>
+        </div>
+        <p class="orig" id="curOrig"></p>
+        <p class="big" id="curTgt"></p>
+      </div>
+      <div id="turns" class="turns"></div>
+    </section>
+
+    <label class="check tts-row">
+      <input id="tts" type="checkbox" checked>
+      <span id="lblTts">Озвучивать финалы</span>
+    </label>
+    <label class="check tts-row" id="chatRow">
+      <input id="toChat" type="checkbox">
+      <span id="lblChat">Отправить запись в чат как голосовую заметку</span>
+    </label>
+
+    <button id="recordBtn" type="button" class="hold-btn" data-mode="voice"
+            aria-label="Удерживайте, чтобы переводить. Влево — отмена, вверх — замок.">
+      <span class="mic-ring"></span>
+      <span class="mic-label" id="holdLabel">Удерживайте</span>
+    </button>
+  </main>
+
+  <div id="recordOverlay" class="record-overlay" hidden>
+    <p id="recordStatus" class="sr-only" aria-live="assertive"></p>
+    <div class="lock-target" id="lockTarget" aria-hidden="true">Замок</div>
+    <div class="record-stage">
+      <canvas id="waveLive" class="wave-live" width="280" height="64"></canvas>
+      <div id="timer" class="timer" aria-hidden="true">0:00</div>
+      <p id="hint" class="record-hint">Удерживайте · влево отмена · вверх замок</p>
+    </div>
+    <div id="lockBar" class="lock-bar" hidden>
+      <button id="btnStop" type="button">Стоп</button>
+      <button id="btnSend" type="button">Отправить</button>
+      <button id="btnTrash" type="button">Отмена</button>
+    </div>
+    <p id="slideCancel" class="slide-cancel" aria-hidden="true">← Отмена</p>
+  </div>
+
+  <div id="toast" class="toast" hidden></div>
+  <footer>
+    <a href="/" id="ftLive">Переводчик</a> · <a href="/chat" id="ftChat">Чат</a> ·
+    <a href="/privacy">Privacy</a> · v{{VERSION}} · {{CONTACT}}
+  </footer>
+  <script src="/static/vad.js"></script>
+  <script src="/static/record-gestures.js"></script>
+  <script src="/static/translate.js"></script>
+</body>
+</html>

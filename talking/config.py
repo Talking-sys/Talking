@@ -112,6 +112,36 @@ class Settings:
     chat_download_token_ttl: int = field(default_factory=lambda: _env_int("CHAT_DOWNLOAD_TOKEN_TTL", 120))
     chat_transcribe: bool = field(default_factory=lambda: _env_bool("CHAT_TRANSCRIBE", True))
 
+    # Voice translation (press-and-hold live + record). Live is free in core;
+    # VOICE_TRANSLATE_LIVE_PREMIUM=1 gates it on the commercial licence hook.
+    voice_translate_live_premium: bool = field(
+        default_factory=lambda: _env_bool("VOICE_TRANSLATE_LIVE_PREMIUM", False)
+    )
+    voice_translate_live_max_s: float = field(
+        default_factory=lambda: _env_float("VOICE_TRANSLATE_LIVE_MAX_S", 120.0)
+    )
+    voice_translate_partial_interval_s: float = field(
+        default_factory=lambda: _env_float("VOICE_TRANSLATE_PARTIAL_INTERVAL_S", 0.8)
+    )
+    voice_translate_partial_window_s: float = field(
+        default_factory=lambda: _env_float("VOICE_TRANSLATE_PARTIAL_WINDOW_S", 3.0)
+    )
+    voice_translate_record_max_ms: int = field(
+        default_factory=lambda: _env_int("VOICE_TRANSLATE_RECORD_MAX_MS", 60_000)
+    )
+    voice_translate_live_connects_per_min: int = field(
+        default_factory=lambda: _env_int("VOICE_TRANSLATE_LIVE_CONNECTS_PER_MIN", 20)
+    )
+    voice_translate_record_per_min: int = field(
+        default_factory=lambda: _env_int("VOICE_TRANSLATE_RECORD_PER_MIN", 20)
+    )
+    voice_translate_max_pending_audio_s: float = field(
+        default_factory=lambda: _env_float("VOICE_TRANSLATE_MAX_PENDING_AUDIO_S", 4.0)
+    )
+    voice_translate_max_queue: int = field(
+        default_factory=lambda: _env_int("VOICE_TRANSLATE_MAX_QUEUE", 64)
+    )
+
     @property
     def production(self) -> bool:
         return self.app_env.lower() in ("production", "prod")

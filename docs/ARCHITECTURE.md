@@ -20,13 +20,15 @@ Phone / browser (HTTPS)
   mic → AudioWorklet 16 kHz PCM
   client VAD (energy; Silero ONNX optional drop-in)
   Web Speech API TTS (default)
-        │  WSS /ws
+        │  WSS /ws  and  WSS /ws/translate/live (hold-to-talk partials)
         ▼
 FastAPI (Python 3.12)
   Session → STT (faster-whisper) → local voice commands
          → Translator (Grok if XAI_API_KEY, else free Google, else stub)
          → RollingBuffer 180 s + OfflineQueue JSONL
          → optional S3-compatible archive
+  LiveTranslateSession → WindowedWhisperSTT (VAD windows) → same Translator
+  POST /api/translate/record → decode_pcm16k + transcribe_and_translate
         │  HTTP only
         ▼
 Commercial service (optional, COMMERCIAL_API_URL)
@@ -74,6 +76,7 @@ talking/                 GPL open core package
   commands.py / languages.py
   commercial/            HTTP client + stubs (no proprietary code)
   chat/                  notes slice (voice_note / video_note); M4 extends this
+  voice_translate/       press-and-hold live WS + record HTTP (reuses STT/translator)
   games/                 placeholder (M8)
   static/                mobile-first HTML/JS
 docs/specs/              owner spec, human contribution evidence

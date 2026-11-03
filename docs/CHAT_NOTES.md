@@ -41,6 +41,8 @@ If STT is already loaded (tests inject FakeSTT) and the audio can be decoded
 + `translation`. Otherwise `transcript_status=skipped` and a reason is stored.
 Uploading a note does **not** load Whisper large-v3.
 
+Press-and-hold **voice translation** (live conversation + record-for-translation) lives on `/translate` and reuses this FSM, `decode_pcm16k`, and the same `transcript` / `translation` fields. See `docs/VOICE_TRANSLATION.md`.
+
 ## Limits (owner spec)
 
 - Notes ≤ 60 s

@@ -13,6 +13,7 @@ from fastapi.staticfiles import StaticFiles
 
 from . import __version__
 from .chat.routes import register_chat
+from .voice_translate.routes import register_voice_translate
 from .commercial.client import verify_webhook
 from .config import Settings, WHISPER_MODELS
 from .engine import Engine
@@ -208,6 +209,7 @@ def create_app(settings: Settings | None = None, engine: Engine | None = None) -
         return eng.status()
 
     register_chat(app)
+    register_voice_translate(app)
 
     # --- Open-core placeholders (future modules) ---
     @app.get("/api/games")

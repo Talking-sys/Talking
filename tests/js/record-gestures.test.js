@@ -26,7 +26,7 @@ function apply(machine, step) {
 
 let failed = 0;
 for (const sc of scripts) {
-  const machine = new RecordGestureMachine(new GestureConfig());
+  const machine = new RecordGestureMachine(new GestureConfig(sc.cfg || {}));
   let snap = null;
   for (const step of sc.steps) snap = apply(machine, step);
   for (const [k, v] of Object.entries(sc.expect)) {

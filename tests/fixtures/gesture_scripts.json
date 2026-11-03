@@ -143,5 +143,45 @@
       {"op": "up", "x": 100, "y": 160, "t": 450}
     ],
     "expect": {"phase": "idle", "action": "cancel"}
+  },
+  {
+    "name": "voice translate: short tap does not toggle when disabled",
+    "cfg": {"enable_toggle": false},
+    "steps": [
+      {"op": "down", "x": 0, "y": 0, "t": 0},
+      {"op": "up", "x": 0, "y": 0, "t": 100}
+    ],
+    "expect": {"mode": "voice", "phase": "idle", "action": "tap"}
+  },
+  {
+    "name": "voice translate: hold then release still sends",
+    "cfg": {"enable_toggle": false},
+    "steps": [
+      {"op": "down", "x": 0, "y": 0, "t": 0},
+      {"op": "tick", "t": 250},
+      {"op": "up", "x": 2, "y": 2, "t": 900}
+    ],
+    "expect": {"mode": "voice", "phase": "idle", "action": "send"}
+  },
+  {
+    "name": "voice translate: slide left cancels",
+    "cfg": {"enable_toggle": false},
+    "steps": [
+      {"op": "down", "x": 200, "y": 200, "t": 0},
+      {"op": "tick", "t": 250},
+      {"op": "move", "x": 120, "y": 200, "t": 400},
+      {"op": "up", "x": 100, "y": 205, "t": 500}
+    ],
+    "expect": {"phase": "idle", "action": "cancel"}
+  },
+  {
+    "name": "voice translate: slide up locks",
+    "cfg": {"enable_toggle": false},
+    "steps": [
+      {"op": "down", "x": 200, "y": 200, "t": 0},
+      {"op": "tick", "t": 250},
+      {"op": "move", "x": 200, "y": 110, "t": 400}
+    ],
+    "expect": {"phase": "locked", "action": "lock"}
   }
 ]

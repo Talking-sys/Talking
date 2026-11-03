@@ -34,6 +34,9 @@ class GestureConfig:
     lock_dy: int = -72
     max_ms: int = 60_000
     slop_px: int = 16
+    # Chat notes tap-toggles voice↔video. Voice translation keeps a single
+    # hold-to-talk mode and reports action "tap" instead.
+    enable_toggle: bool = True
 
 
 class RecordGestureMachine:
@@ -93,6 +96,8 @@ class RecordGestureMachine:
             dx, dy = x - self._sx, y - self._sy
             dist = (dx * dx + dy * dy) ** 0.5
             if self.phase == PHASE_ARMED and self.elapsed_ms < self.cfg.tap_ms and dist <= self.cfg.slop_px:
+                if not self.cfg.enable_toggle:
+                    return self._idle("tap")
                 self.mode = MODE_VIDEO if self.mode == MODE_VOICE else MODE_VOICE
                 return self._idle("toggle")
             if self.phase == PHASE_ARMED:
