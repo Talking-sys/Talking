@@ -1,9 +1,8 @@
-"""Voice/video note helpers: optional STT + translation on the audio track.
+"""Voice/video note helpers: PCM decode for on-demand transcription.
 
-WAV is decoded with the stdlib. WebM/MP4/OGG need ffmpeg on PATH; if it is
-missing the note is still stored and ``transcript_status`` is ``skipped``.
-Whisper is not loaded on upload (large-v3 is heavy) — we only transcribe when
-the engine already has a ready STT (tests inject FakeSTT).
+WAV is decoded with the stdlib. WebM/MP4/OGG need ffmpeg on PATH. Upload does
+**not** transcribe by default (see ``talking/chat/transcribe.py``); premium
+users tap «Расшифровать» after the note is stored.
 """
 from __future__ import annotations
 
@@ -23,6 +22,10 @@ from .models import Message
 log = logging.getLogger(__name__)
 
 _FFMPEG_FMT = {"wav": "wav", "webm": "webm", "ogg": "ogg", "mp4": "mp4", "mp3": "mp3"}
+
+
+def ffmpeg_available() -> bool:
+    return shutil.which("ffmpeg") is not None
 
 
 def _wav_to_mono_f32(data: bytes, sample_rate: int) -> np.ndarray | None:
@@ -83,42 +86,16 @@ def decode_pcm16k(data: bytes, container: str, sample_rate: int = 16000) -> np.n
 
 def attach_transcript(engine, message: Message, media: StoredMedia, data: bytes,
                       target_lang: str | None) -> Message:
-    """Fill transcript/translation in-place. Never raises to the caller."""
+    """Legacy PR #3 helper. Prefer ``transcribe.run_pipeline`` (on-demand).
+
+    Kept so ``CHAT_TRANSCRIBE_ON_UPLOAD=1`` can still fill a note in-process.
+    Status values are ``done`` / ``failed`` (``ok`` / ``skipped`` aliases remain
+    readable from older JSONL).
+    """
+    from .transcribe import run_pipeline
+
     if not getattr(engine.s, "chat_transcribe", True):
-        message.transcript_status = "skipped"
+        message.transcript_status = "failed"
         message.transcript_reason = "CHAT_TRANSCRIBE disabled"
         return message
-    stt = getattr(engine, "stt", None)
-    if stt is None or not getattr(stt, "ready", False):
-        message.transcript_status = "skipped"
-        message.transcript_reason = "STT is not loaded; transcript not attached"
-        return message
-    audio = decode_pcm16k(data, media.container, getattr(engine.s, "sample_rate", 16000))
-    if audio is None or len(audio) < 160:
-        message.transcript_status = "skipped"
-        message.transcript_reason = (
-            f"no PCM decoder for {media.container} "
-            "(WAV works without ffmpeg; WebM/MP4/OGG need ffmpeg on PATH)"
-        )
-        return message
-    try:
-        result = stt.transcribe(audio)
-    except Exception as e:  # noqa: BLE001 — note must still send
-        log.warning("note STT failed: %s", e)
-        message.transcript_status = "error"
-        message.transcript_reason = str(e)[:200]
-        return message
-    message.transcript = result.text
-    message.src_lang = result.lang
-    message.transcript_status = "ok"
-    tgt = (target_lang or engine.store.get("target_lang") or "en").strip() or "en"
-    message.tgt_lang = tgt
-    try:
-        tr = engine.translator.translate(result.text, result.lang, tgt)
-        message.translation = tr.text
-        message.translation_provider = tr.provider
-    except Exception as e:  # noqa: BLE001
-        message.translation = result.text
-        message.translation_provider = "original"
-        message.transcript_reason = f"translation failed, showing original: {e}"[:200]
-    return message
+    return run_pipeline(engine, message, media, data, target_lang)

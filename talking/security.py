@@ -80,12 +80,14 @@ class TokenBucket:
 
     def allow(self, key: str) -> bool:
         now = time.time()
-        last = self._ts[key]
-        self._tokens[key] = min(self.burst, self._tokens[key] + (now - last) * self.rate)
+        last = self._ts.get(key, now)
+        tokens = self._tokens.get(key, float(self.burst))
+        tokens = min(self.burst, tokens + max(0.0, now - last) * self.rate)
         self._ts[key] = now
-        if self._tokens[key] >= 1:
-            self._tokens[key] -= 1
+        if tokens >= 1:
+            self._tokens[key] = tokens - 1
             return True
+        self._tokens[key] = tokens
         return False
 
 

@@ -162,7 +162,7 @@ class Engine:
         self._histories: dict[str, RollingBuffer] = {}
         self.offline = OfflineQueue(d, settings.buffer_seconds)
         self.archive = archive or ArchiveManager(d, remote=s3_from_env())
-        self.commercial = CommercialClient(settings.commercial_api_url, settings.commercial_api_token)
+        self.commercial = CommercialClient.from_settings(settings)
         self.net = "online" if not self.offline.pending_segments() else "offline"
         self._sessions: set[Session] = set()
         self._slock = threading.Lock()

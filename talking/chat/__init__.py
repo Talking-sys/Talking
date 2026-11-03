@@ -7,6 +7,7 @@ This is a thin slice so ROADMAP M4 (full chat) can extend it:
 - ``media.DownloadTokens`` — expiring play tokens + one-time downloads
 - ``gestures.RecordGestureMachine`` — hold-to-record / slide-to-cancel / lock
 - HTTP + ``/ws/chat`` in ``routes.py``
+- On-demand premium transcription in ``transcribe.py``
 
 Not in this slice: unique nicks, prefix search, groups, block lists, stickers,
 polls, 3-minute auto-delete. See ``docs/CHAT_NOTES.md``.

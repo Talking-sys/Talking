@@ -3,6 +3,16 @@
 The open core MUST NOT import, link, or vendor proprietary modules.
 See docs/ARCHITECTURE.md and docs/commercial/.
 """
-from .client import CommercialClient, CommercialDisabled
+from .client import (
+    ENTITLEMENT_VOICE_TRANSCRIPTION,
+    CommercialClient,
+    CommercialDisabled,
+    EntitlementDecision,
+)
 
-__all__ = ["CommercialClient", "CommercialDisabled"]
+__all__ = [
+    "CommercialClient",
+    "CommercialDisabled",
+    "EntitlementDecision",
+    "ENTITLEMENT_VOICE_TRANSCRIPTION",
+]

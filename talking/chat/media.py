@@ -279,6 +279,29 @@ class MediaLibrary:
     def read_bytes(self, media: StoredMedia) -> bytes:
         return Path(media.path).read_bytes()
 
+    def delete(self, user_id: str, media_id: str) -> None:
+        """Remove a blob and drop it from the quota index. Missing ids are a no-op."""
+        try:
+            media_id = check_media_id(media_id)
+        except MediaError:
+            return
+        path: Path | None = None
+        with self._lock:
+            idx = self._load_index(user_id)
+            files = idx.get("files") or {}
+            rec = files.pop(media_id, None)
+            if not rec:
+                return
+            idx["files"] = files
+            idx["used_bytes"] = max(0, int(idx.get("used_bytes") or 0) - int(rec.get("size") or 0))
+            self._save_index(user_id, idx)
+            path = self._user_dir(user_id) / rec["path"]
+        if path is not None:
+            try:
+                path.unlink(missing_ok=True)
+            except OSError:
+                pass
+
     def quota(self, user_id: str) -> dict[str, int]:
         idx = self._load_index(user_id)
         return {
