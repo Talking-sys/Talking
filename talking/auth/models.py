@@ -128,22 +128,3 @@ class OAuthState(Base):
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     consumed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     ip_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
-
-
-class OAuthState(Base):
-    """Authorization-code + PKCE state. Verifier is encrypted; nonce is hashed."""
-    __tablename__ = "oauth_states"
-
-    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    state_hash: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
-    nonce_hash: Mapped[str] = mapped_column(String(64), nullable=False)
-    code_verifier_enc: Mapped[str] = mapped_column(Text, nullable=False)
-    platform: Mapped[str] = mapped_column(String(16), nullable=False)
-    intent: Mapped[str] = mapped_column(String(16), nullable=False)
-    redirect_uri: Mapped[str] = mapped_column(String(512), nullable=False)
-    client_id: Mapped[str] = mapped_column(String(128), nullable=False)
-    user_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, nullable=False)
-    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-    consumed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    ip_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
