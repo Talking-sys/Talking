@@ -83,7 +83,7 @@ talking/                 GPL open core package
   commands.py / languages.py
   auth/                  sessions, cookies, anonymous + phone (M10 stages 0–1)
   commercial/            HTTP client + stubs (no proprietary code)
-  chat/                  unified store (notes + text + edits + on-demand premium STT); M4 extends this
+  chat/                  unified store (notes + text + edits + groups + on-demand premium STT); M4 extends this
   voice_translate/       press-and-hold live WS + record HTTP (reuses STT/translator)
   unfurl/                SSRF-safe Open Graph / Twitter / oEmbed unfurl + image proxy
   games/                 placeholder (M8)

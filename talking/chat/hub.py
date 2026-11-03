@@ -31,6 +31,13 @@ class ChatHub:
         if not bucket:
             self._subs.pop(user_id, None)
 
+    def publish_many(self, user_ids, event: dict) -> None:
+        seen: set[str] = set()
+        for uid in user_ids or ():
+            if uid and uid not in seen:
+                seen.add(uid)
+                self.publish(uid, event)
+
     def publish(self, user_id: str, event: dict) -> None:
         """Fan-out. Safe from worker threads (transcription jobs)."""
         def _fanout() -> None:
@@ -56,11 +63,15 @@ class ChatHub:
 
     def publish_edit(self, msg_public: dict) -> None:
         event = {"type": "message_edited", "message": msg_public}
+        dialog = str(msg_public.get("conversation_id") or msg_public.get("dialog_id") or "")
         keys = {
-            "*",
             str(msg_public.get("sender_id") or ""),
-            str(msg_public.get("conversation_id") or msg_public.get("dialog_id") or ""),
+            dialog,
         }
+        # Direct chats still use the wildcard subscription. Group events must
+        # never ride "*" — callers fan out to member user ids instead.
+        if not dialog.startswith("g"):
+            keys.add("*")
         for key in keys:
             if key:
                 self.publish(key, event)

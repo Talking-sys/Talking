@@ -9,13 +9,14 @@ Unified after merging notes (PR #3), link previews (PR #5), and edits (PR #6):
 - ``routes.py`` keeps dialog/notes/media paths
 - On-demand premium transcription in ``transcribe.py``
 
-Not in this slice: unique nicks, prefix search, groups, block lists, stickers,
-polls, 3-minute auto-delete. See ``docs/CHAT_NOTES.md`` and ``docs/CHAT_EDITING.md``.
+Not in this slice: unique nicks, prefix search, block lists, stickers,
+polls, geo, 3-minute auto-delete. Groups (create, roles, invites, per-member
+translation) extend the same store. See ``docs/CHAT_NOTES.md`` and ``docs/CHAT_EDITING.md``.
 """
 
 STAGE = "notes-slice"
 STATUS = "partial"
-PARTIAL = ["notes", "link_previews", "message_edit", "voice_transcription"]
+PARTIAL = ["notes", "link_previews", "message_edit", "voice_transcription", "groups"]
 
 from .edits import EditError, apply_text_edit, check_can_edit  # noqa: E402,F401
 from .gestures import GestureConfig, RecordGestureMachine  # noqa: E402,F401

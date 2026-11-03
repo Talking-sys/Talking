@@ -1,6 +1,6 @@
 """HTTP + WebSocket endpoints for the notes slice.
 
-Designed so M4 can keep these paths and add nicks/groups beside them:
+Designed so M4 can keep these paths and add nicks beside them. Groups (M6):
   GET  /api/chat
   GET/POST /api/chat/dialogs
   GET/POST /api/chat/dialogs/{id}/messages
@@ -33,7 +33,17 @@ from talking.security import TokenBucket, client_ip
 
 from . import PARTIAL
 from .events import ensure_hub
+from .group_routes import register_group_routes
+from .groups import GroupError
 from .hub import ChatHub
+from .present import (
+    fill_translations,
+    member_limit,
+    public_message,
+    publish_deleted,
+    publish_message,
+    viewer_lang,
+)
 from .media import (
     DownloadTokens, MediaError, MediaLibrary,
     check_media_id, parse_waveform, validate_duration_ms, validate_kind,
@@ -47,9 +57,13 @@ log = logging.getLogger(__name__)
 TEXT_MAX = 500
 
 
-def _http(err: MediaError | ValueError | KeyError) -> HTTPException:
+def _http(err: MediaError | ValueError | KeyError | GroupError | PermissionError) -> HTTPException:
     if isinstance(err, MediaError):
         return HTTPException(err.status, str(err))
+    if isinstance(err, GroupError):
+        return HTTPException(err.status, err.message)
+    if isinstance(err, PermissionError):
+        return HTTPException(403, str(err) or "forbidden")
     if isinstance(err, KeyError):
         return HTTPException(404, str(err) or "not found")
     return HTTPException(400, str(err))
@@ -60,13 +74,7 @@ def _user_id(request: Request) -> str:
 
 
 def _public_message(app: FastAPI, user_id: str, msg: Message) -> dict:
-    play = None
-    if msg.media_id:
-        tok = app.state.chat_tokens.mint(
-            msg.media_id, user_id, one_time=False, ttl=app.state.settings.chat_play_token_ttl,
-        )
-        play = f"/api/chat/media/{msg.media_id}?token={tok}"
-    return msg.to_public(play_url=play)
+    return public_message(app, user_id, msg)
 
 
 async def _read_limited(upload: UploadFile, limit: int) -> bytes:
@@ -110,7 +118,9 @@ def register_chat(app: FastAPI) -> None:
             raise HTTPException(429, "rate limit: too many uploads")
 
     def _public_for(uid: str, msg: Message) -> dict:
-        return _public_message(app, uid, msg)
+        return public_message(app, uid, msg)
+
+    register_group_routes(app)
 
     app.state.transcription = TranscriptionService(
         engine=app.state.engine,
@@ -183,7 +193,7 @@ def register_chat(app: FastAPI) -> None:
             "partial": list(PARTIAL),
             "feature": "notes",
             "message": "Telegram-style voice_note / video_note. Full chat is ROADMAP M4.",
-            "roadmap_m4": "Unique nicks, prefix search, groups, block, 3-minute auto-delete extend this store.",
+            "roadmap_m4": "Unique nicks, prefix search, block, 3-minute auto-delete extend this store.",
             "types": list(MESSAGE_TYPES),
             "limits": {
                 "text_chars": TEXT_MAX,
@@ -192,6 +202,8 @@ def register_chat(app: FastAPI) -> None:
                 "video_max_bytes": s.chat_video_max_bytes,
                 "quota_bytes": s.chat_quota_bytes,
                 "messages_per_min": s.chat_msg_per_min,
+                "group_max_members": member_limit(s, app.state.engine.commercial, uid),
+                "group_trial_max_members": int(getattr(s, "chat_group_trial_max_members", 5) or 5),
             },
             "quota": q,
             "transcription": _transcription_public(uid),
@@ -335,7 +347,7 @@ def register_chat(app: FastAPI) -> None:
         except (MediaError, ValueError, KeyError) as e:
             raise _http(e)
         public = _public_message(app, uid, msg)
-        app.state.chat_hub.publish(uid, {"type": "chat.message", "message": public})
+        publish_message(app, msg, actor_id=uid)
         return JSONResponse(public, status_code=201)
 
     @app.post("/api/chat/dialogs/{dialog_id}/messages")
@@ -373,7 +385,14 @@ def register_chat(app: FastAPI) -> None:
                 created_at=time.time(),
                 text=text,
             )
-            if tgt:
+            if app.state.chat_store.is_group(dialog_id):
+                group = app.state.chat_store.groups.get(dialog_id)
+                src = str(data.get("src_lang") or "") or viewer_lang(
+                    app.state.chat_store, uid, dialog_id,
+                    app.state.engine.store.get("target_lang") or "en",
+                )
+                fill_translations(app, msg, src_lang=src, members=group.members if group else [])
+            elif tgt:
                 src = str(data.get("src_lang") or "en")
                 try:
                     tr = app.state.engine.translator.translate(text, src, tgt)
@@ -388,7 +407,7 @@ def register_chat(app: FastAPI) -> None:
                     msg.transcript_reason = str(e)[:200]
             app.state.chat_store.add_message(uid, msg)
             public = _public_message(app, uid, msg)
-            app.state.chat_hub.publish(uid, {"type": "chat.message", "message": public})
+            publish_message(app, msg, actor_id=uid)
             return JSONResponse(public, status_code=201)
 
         # voice_note / video_note from a previously uploaded media_id
@@ -405,7 +424,7 @@ def register_chat(app: FastAPI) -> None:
         except (MediaError, ValueError, KeyError) as e:
             raise _http(e)
         public = _public_message(app, uid, msg)
-        app.state.chat_hub.publish(uid, {"type": "chat.message", "message": public})
+        publish_message(app, msg, actor_id=uid)
         return JSONResponse(public, status_code=201)
 
     @app.post("/api/chat/messages/{message_id}/transcribe")
@@ -469,10 +488,15 @@ def register_chat(app: FastAPI) -> None:
         msg = app.state.chat_store.find_message(uid, message_id)
         if msg is None:
             raise HTTPException(404, "message not found")
+        if app.state.chat_store.is_group(msg.dialog_id) and msg.sender_id != uid:
+            group = app.state.chat_store.groups.get(msg.dialog_id)
+            actor = group.member(uid) if group else None
+            if actor is None or actor.role not in ("owner", "admin"):
+                raise HTTPException(403, "not the author")
         removed = app.state.chat_store.delete_message(uid, msg.dialog_id, msg.id)
         if removed and removed.media_id:
-            app.state.chat_media.delete(uid, removed.media_id)
-        app.state.chat_hub.publish(uid, {"type": "chat.deleted", "message_id": message_id})
+            app.state.chat_media.delete(removed.sender_id or uid, removed.media_id)
+        publish_deleted(app, msg.dialog_id, message_id, actor_id=uid)
         return {"ok": True, "id": message_id}
 
     @app.websocket("/ws/chat")
@@ -494,9 +518,30 @@ def register_chat(app: FastAPI) -> None:
         hub.subscribe(uid, q)
         hub.subscribe("*", q)
 
+        def _event_visible(ev: dict) -> bool:
+            if not isinstance(ev, dict):
+                return True
+            msg = ev.get("message") if isinstance(ev.get("message"), dict) else {}
+            dialog_id = (
+                ev.get("group_id")
+                or ev.get("dialog_id")
+                or msg.get("dialog_id")
+                or msg.get("conversation_id")
+            )
+            if ev.get("type") in (
+                "chat.hello", "pong",
+                "chat.group.kicked", "chat.group.left", "chat.group.dissolved",
+            ):
+                return True
+            if dialog_id and app.state.chat_store.is_group(str(dialog_id)):
+                return app.state.chat_store.groups.is_member(str(dialog_id), uid)
+            return True
+
         async def sender():
             while True:
                 ev = await q.get()
+                if not _event_visible(ev):
+                    continue
                 await ws.send_text(json.dumps(ev, ensure_ascii=False))
 
         send_task = asyncio.create_task(sender())

@@ -16,8 +16,9 @@ can extend it instead of replacing it.
 | HTTP + `/ws/chat` | `talking/chat/routes.py` | Add nicks, block, 10/min stays |
 | Optional STT + translation under the note | `talking/chat/notes.py` | Same engine as live translation |
 
-Auth is still **M10**. Until then the local `user_id` from settings is the owner
-of every dialog (admin must not grow a read API here).
+Auth is **M10** (`docs/AUTH.md`). Dialogs are owned by `current_user`. Groups
+(M6 slice) share the same store — see `docs/CHAT_GROUPS.md`. Admin must not
+grow a read API here.
 
 ## Gestures (Telegram)
 
