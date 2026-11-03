@@ -91,10 +91,24 @@ All rights reserved, **separate repo**, hateaboutyouone: admin, licensing, Talk-
 
 Contract: `docs/commercial/openapi-commercial-v1.yaml`. This run does not create the proprietary repository.
 
+## Game SDK (embed translation in a third-party game)
+
+Studios can send text or audio to Talking and get a translation in the player's language (no per-language voiceover). Clients live in `sdk/` (Python + JS; Unity/Unreal/Godot sketches) and are **intended MIT** — confirmation pending, see `sdk/NOTICE.md`. The server API is `GET/POST /api/sdk/v1/...` (GPL). Guide: `docs/sdk/README.md` (English) and `docs/sdk/README.ru.md`.
+
+```bash
+# placeholder key only
+SDK_API_KEYS=demo:change-me APP_TRANSLATE_PROVIDERS=stub python main.py serve
+export TALKING_SERVER_URL=http://127.0.0.1:8000 TALKING_API_KEY=change-me
+python sdk/examples/python_game_demo/main.py
+```
+
+Never put real keys in source. Empty `SDK_API_KEYS` disables the SDK routes.
+
 ## Docs
 
 - `docs/ARCHITECTURE.md` — folders and API boundary
 - `docs/ROADMAP.md` — next PRs, including unverified vendor names
+- `docs/sdk/` — game-embed SDK (EN + RU), plan, OpenAPI
 - `docs/specs/OWNER_SPEC.md` — owner spec verbatim (human contribution)
 - `NOTICE.md` — licence caveats, **not legal advice**
 - `docs/GOOGLE_SCOPES.md` — Google OAuth checklist

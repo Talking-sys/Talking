@@ -19,6 +19,7 @@ from .engine import Engine
 from .games import not_implemented as games_stub
 from .ids import secure_dir
 from .languages import languages_payload
+from .sdk_api import SdkError, sdk_error_response, sdk_router
 from .security import SecurityHeadersMiddleware, TokenBucket, client_ip, load_server_secret, sign, unsign
 from .settings_store import PAUSE_MAX, PAUSE_MIN
 from .store import ping_postgres, ping_redis
@@ -50,17 +51,28 @@ def create_app(settings: Settings | None = None, engine: Engine | None = None) -
 
     origins = [o.strip() for o in s.cors_origins.split(",") if o.strip()]
     if origins:
-        app.add_middleware(CORSMiddleware, allow_origins=origins, allow_methods=["GET", "POST"],
-                           allow_headers=["Content-Type"], allow_credentials=True, max_age=600)
+        app.add_middleware(
+            CORSMiddleware, allow_origins=origins, allow_methods=["GET", "POST"],
+            allow_headers=["Content-Type", "Authorization", "X-Talking-Api-Key", "X-Talking-App-Id"],
+            expose_headers=["Retry-After", "X-RateLimit-Limit", "X-RateLimit-Remaining"],
+            allow_credentials=True, max_age=600,
+        )
     app.add_middleware(SecurityHeadersMiddleware, production=s.production)
     app.mount("/static", StaticFiles(directory=STATIC), name="static")
 
     ws_limiter = TokenBucket(s.ws_connects_per_min)
     api_limiter = TokenBucket(s.rate_limit_per_min)
+    app.state.sdk_limiter = TokenBucket(s.sdk_rate_limit_per_min)
 
     def _limit(request: Request):
         if not api_limiter.allow(client_ip(request)):
             raise HTTPException(429, "rate limit")
+
+    @app.exception_handler(SdkError)
+    async def _sdk_error(_request: Request, exc: SdkError):
+        return sdk_error_response(exc)
+
+    app.include_router(sdk_router)
 
     @app.get("/", response_class=HTMLResponse)
     def index():

@@ -80,13 +80,20 @@ class TokenBucket:
 
     def allow(self, key: str) -> bool:
         now = time.time()
-        last = self._ts[key]
-        self._tokens[key] = min(self.burst, self._tokens[key] + (now - last) * self.rate)
+        last = self._ts[key] if key in self._ts else now
+        # max(0, dt): defaultdict(time.time) can be slightly *after* `now` on first access.
+        self._tokens[key] = min(self.burst, self._tokens[key] + max(0.0, now - last) * self.rate)
         self._ts[key] = now
         if self._tokens[key] >= 1:
             self._tokens[key] -= 1
             return True
         return False
+
+    def remaining(self, key: str) -> float:
+        now = time.time()
+        last = self._ts[key] if key in self._ts else now
+        tokens = self._tokens[key] if key in self._tokens else float(self.burst)
+        return min(self.burst, tokens + max(0.0, now - last) * self.rate)
 
 
 def client_ip(request) -> str:

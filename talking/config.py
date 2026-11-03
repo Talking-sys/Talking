@@ -88,6 +88,13 @@ class Settings:
     ws_connects_per_min: int = field(default_factory=lambda: _env_int("APP_WS_CONNECTS_PER_MIN", 20))
     probe_interval_s: float = field(default_factory=lambda: _env_float("APP_PROBE_INTERVAL", 10.0))
 
+    # Game-embed SDK HTTP API (/api/sdk/v1). Empty keys = endpoints refuse traffic.
+    # Format: "app_id:secret,other_app:other_secret" (first ':' or '=' splits). Never commit real secrets.
+    sdk_api_keys: str = field(default_factory=lambda: _env("SDK_API_KEYS", ""))
+    sdk_rate_limit_per_min: int = field(default_factory=lambda: _env_int("SDK_RATE_LIMIT_PER_MIN", 60))
+    sdk_max_text_chars: int = field(default_factory=lambda: _env_int("SDK_MAX_TEXT_CHARS", 4000))
+    sdk_max_audio_bytes: int = field(default_factory=lambda: _env_int("SDK_MAX_AUDIO_BYTES", 5 * 1024 * 1024))
+
     database_url: str = field(default_factory=lambda: _env("DATABASE_URL", ""))
     redis_url: str = field(default_factory=lambda: _env("REDIS_URL", ""))
 

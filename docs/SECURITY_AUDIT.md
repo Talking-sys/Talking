@@ -6,7 +6,7 @@ Contact: hateaboutyou111@icloud.com.
 
 | # | Layer | Stage 1 status | Later (M13 / commercial repo) |
 |---|---|---|---|
-| 1 | Backend | CSP, nosniff, frame-ancestors none, WS origin check, HMAC WS token, rate buckets | AES-256-GCM fields, pgcrypto option, SSRF checks, session TTL |
+| 1 | Backend | CSP, nosniff, frame-ancestors none, WS origin check, HMAC WS token, rate buckets, SDK API keys hashed in logs + per-key bucket | AES-256-GCM fields, pgcrypto option, SSRF checks, session TTL |
 | 2 | Frontend | Same-origin static, no eval, mic over HTTPS | Mini-browser sandbox without JS/data URLs, EXIF strip |
 | 3 | Admin | **Not in this repo** — stub `/api/commercial/admin/health` | Secret token in header or one-time cookie form, never in URL; 2FA |
 | 4 | Licences | Stub `/api/commercial/license` | Signed licences, public key only in the client build, revocation list |

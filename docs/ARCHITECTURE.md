@@ -39,6 +39,11 @@ Works **locally with no keys**: stub translator, local JSONL/SQLite, no Postgres
 
 Core **exposes**:
 
+- `GET /api/sdk/v1` — game-embed SDK info (API-key auth)
+- `GET /api/sdk/v1/languages` — Whisper language list for game clients
+- `POST /api/sdk/v1/translate/text` — text in, translation out (optional TTS)
+- `POST /api/sdk/v1/translate/text/stream` — same, SSE envelope
+- `POST /api/sdk/v1/translate/audio` — STT then translation (wav/pcm)
 - `GET /api/commercial/status` — whether a commercial backend is configured
 - `GET /api/commercial/license` — proxy/stub
 - `GET /api/commercial/talk-coins` — proxy/stub
@@ -68,6 +73,7 @@ If `COMMERCIAL_API_URL` is empty, every call returns a disabled stub (`{"ok": fa
 ```
 talking/                 GPL open core package
   server.py              FastAPI + WebSocket
+  sdk_api.py             /api/sdk/v1 game-embed HTTP (keys, rate limit)
   engine.py              STT → command → translate → buffer
   stt.py / translate.py / tts.py / vad.py
   buffer.py / offline_queue.py / archive.py
@@ -76,6 +82,9 @@ talking/                 GPL open core package
   chat/                  placeholder (M4)
   games/                 placeholder (M8)
   static/                mobile-first HTML/JS
+sdk/                     intended MIT client (PENDING owner confirmation)
+  python/  js/  bindings/  examples/  LICENSE  NOTICE.md
+docs/sdk/                game SDK guide (EN + RU), plan, OpenAPI
 docs/specs/              owner spec, human contribution evidence
 ```
 

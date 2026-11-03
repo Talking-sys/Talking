@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Talking SDK — browser snippet</title>
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 40rem; margin: 2rem auto; padding: 0 1rem; }
+    label { display: block; margin-top: 0.75rem; font-weight: 600; }
+    input, textarea { width: 100%; box-sizing: border-box; padding: 0.4rem; }
+    button { margin-top: 1rem; padding: 0.4rem 0.9rem; }
+    pre { background: #111; color: #eee; padding: 0.75rem; overflow: auto; }
+    .hint { color: #555; font-size: 0.9rem; }
+  </style>
+</head>
+<body>
+  <h1>Talking SDK browser snippet</h1>
+  <p class="hint">API keys stay in this form only. Do not commit them. For a local stub server:
+    <code>SDK_API_KEYS=demo:change-me APP_TRANSLATE_PROVIDERS=stub python main.py serve</code>
+  </p>
+  <label>Server URL <input id="server" placeholder="http://127.0.0.1:8000" value="http://127.0.0.1:8000"></label>
+  <label>API key <input id="key" type="password" autocomplete="off" placeholder="YOUR_API_KEY"></label>
+  <label>App id <input id="app" placeholder="demo" value="demo"></label>
+  <label>Target language <input id="target" value="ru"></label>
+  <label>Text <textarea id="text" rows="3">The dragon is asleep. Sneak past?</textarea></label>
+  <button id="run" type="button">Translate</button>
+  <pre id="out">Ready.</pre>
+  <script type="module" src="./demo.js"></script>
+</body>
+</html>

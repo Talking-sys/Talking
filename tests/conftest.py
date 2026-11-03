@@ -22,7 +22,7 @@ def make_client(tmp_path, monkeypatch):
     from talking.stt import FakeSTTEngine
     from talking.translate import StubProvider, Translator
 
-    def _make(stt=None, translator=None, env=None):
+    def _make(stt=None, translator=None, env=None, tts=None):
         for k, v in (env or {}).items():
             monkeypatch.setenv(k, v)
         monkeypatch.setenv("APP_DATA_DIR", str(tmp_path / "data"))
@@ -30,7 +30,7 @@ def make_client(tmp_path, monkeypatch):
         s = Settings()
         tr = translator or Translator(s, providers=[StubProvider()])
         fake = stt or FakeSTTEngine(s, default_text="hello", default_lang="en")
-        eng = Engine(s, translator=tr, stt=fake, start_background=False)
+        eng = Engine(s, translator=tr, stt=fake, tts=tts, start_background=False)
         app = create_app(s, eng)
         c = TestClient(app)
         c.eng = eng

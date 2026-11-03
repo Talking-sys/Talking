@@ -1,0 +1,23 @@
+{
+  "name": "talking-sdk",
+  "version": "0.1.0",
+  "description": "Talking instant-translation SDK for games (text and speech)",
+  "license": "MIT",
+  "type": "module",
+  "main": "src/index.js",
+  "types": "src/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./src/index.d.ts",
+      "import": "./src/index.js"
+    }
+  },
+  "files": ["src", "README.md"],
+  "keywords": ["talking", "translation", "game", "sdk"],
+  "scripts": {
+    "test": "node --test tests/client.test.js"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
