@@ -25,6 +25,25 @@
       ariaCircle: "Кружочек",
       ariaTranscribe: "Расшифровать голосовую заметку",
       ariaLocked: "Расшифровка недоступна без Premium",
+      dialogs: "Чаты",
+      newGroup: "Группа",
+      members: "Участники",
+      groupSettings: "Группа",
+      groupName: "Название",
+      groupAvatar: "Аватар (https или эмодзи)",
+      groupDesc: "Описание",
+      saveGroup: "Сохранить",
+      addMember: "Добавить user_id",
+      add: "Добавить",
+      invite: "Пригласить",
+      leave: "Выйти",
+      kick: "Удалить",
+      owner: "владелец",
+      admin: "админ",
+      member: "участник",
+      promptGroup: "Название группы",
+      joined: "Вы в группе",
+      inviteCopied: "Ссылка приглашения",
     },
     en: {
       targetLang: "Note translation language",
@@ -46,6 +65,25 @@
       ariaCircle: "Round video note",
       ariaTranscribe: "Transcribe voice note",
       ariaLocked: "Transcription requires Premium",
+      dialogs: "Chats",
+      newGroup: "Group",
+      members: "Members",
+      groupSettings: "Group",
+      groupName: "Name",
+      groupAvatar: "Avatar (https or emoji)",
+      groupDesc: "Description",
+      saveGroup: "Save",
+      addMember: "Add user_id",
+      add: "Add",
+      invite: "Invite",
+      leave: "Leave",
+      kick: "Remove",
+      owner: "owner",
+      admin: "admin",
+      member: "member",
+      promptGroup: "Group name",
+      joined: "You joined the group",
+      inviteCopied: "Invite link",
     },
   };
 
@@ -73,6 +111,9 @@
     entitled: false,
     freeMode: "lock",
     pollers: {},
+    dialogs: [],
+    group: null,
+    me: "local",
   };
 
   function t(key) {
@@ -93,6 +134,8 @@
     });
     const sel = $("target");
     if (sel) sel.setAttribute("aria-label", t("targetLang"));
+    const dialogs = $("dialogSelect");
+    if (dialogs) dialogs.setAttribute("aria-label", t("dialogs"));
   }
 
   function toast(text) {
@@ -633,7 +676,26 @@
     const hasTr = !!(msg.translation && msg.transcript && msg.translation !== msg.transcript);
     row.innerHTML = '<div class="meta"><span>' + clock + "</span><span>" + kindLabel +
       "</span></div>" + media + noteToolsHtml(msg);
-    if (msg.type === "text") row.querySelector(".body").textContent = msg.translation || msg.text || "";
+    if (msg.type === "text") {
+      const bodyEl = row.querySelector(".body");
+      bodyEl.textContent = msg.translation || msg.text || "";
+      if (msg.translation && msg.text && msg.translation !== msg.text) {
+        const origBtn = document.createElement("button");
+        origBtn.type = "button";
+        origBtn.className = "show-orig";
+        origBtn.textContent = t("showOrig");
+        const orig = document.createElement("p");
+        orig.className = "orig-text orig-wrap";
+        orig.hidden = true;
+        orig.textContent = msg.text;
+        origBtn.addEventListener("click", () => {
+          orig.hidden = !orig.hidden;
+          origBtn.textContent = orig.hidden ? t("showOrig") : t("hideOrig");
+        });
+        row.appendChild(origBtn);
+        row.appendChild(orig);
+      }
+    }
     const trEl = row.querySelector(".translation");
     if (trEl && msg.translation) trEl.textContent = msg.translation;
     const orig = row.querySelector(".orig-wrap");
@@ -686,7 +748,7 @@
       const r = await fetch("/api/chat/dialogs/" + encodeURIComponent(state.dialogId) + "/messages", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ type: "text", text, target_lang: state.target, src_lang: "ru" }),
+        body: JSON.stringify({ type: "text", text, target_lang: state.target, src_lang: state.target }),
       });
       const body = await r.json().catch(() => ({}));
       if (!r.ok) { toast(body.detail || ("Ошибка " + r.status)); return; }
@@ -705,7 +767,15 @@
     ws.onmessage = (e) => {
       try {
         const ev = JSON.parse(e.data);
-        if (ev.type === "chat.message" && ev.message) upsertMessage(ev.message);
+        const msgDialog = ev.message && (ev.message.dialog_id || ev.message.conversation_id);
+        if (ev.type === "chat.message" && ev.message && (!msgDialog || msgDialog === state.dialogId)) {
+          upsertMessage(ev.message);
+        }
+        if (ev.type === "chat.group" || ev.type === "chat.group.member") loadDialogs();
+        if ((ev.type === "chat.group.left" || ev.type === "chat.group.kicked" || ev.type === "chat.group.dissolved")
+            && ev.group_id === state.dialogId) {
+          loadDialogs();
+        }
         if (ev.type === "chat.transcript" && ev.message_id) {
           if (ev.transcript && ev.transcript.status && ev.transcript.status !== "pending") {
             if (state.pollers[ev.message_id]) {
@@ -723,13 +793,109 @@
     ws.onclose = () => setTimeout(connect, 2000);
   }
 
+  function currentDialog() {
+    return (state.dialogs || []).find((d) => d.id === state.dialogId) || null;
+  }
+
+  function isGroupDialog() {
+    const d = currentDialog();
+    return !!(d && d.kind === "group");
+  }
+
+  function fillDialogSelect() {
+    const sel = $("dialogSelect");
+    if (!sel) return;
+    sel.innerHTML = "";
+    (state.dialogs || []).forEach((d) => {
+      const o = document.createElement("option");
+      o.value = d.id;
+      o.textContent = (d.kind === "group" ? "👥 " : "") + (d.title || d.id);
+      sel.appendChild(o);
+    });
+    sel.value = state.dialogId;
+    const info = $("groupInfoBtn");
+    if (info) info.hidden = !isGroupDialog();
+  }
+
+  async function loadDialogs() {
+    const dialogs = await fetch("/api/chat/dialogs").then((r) => r.json());
+    state.dialogs = Array.isArray(dialogs) ? dialogs : [];
+    if (!state.dialogs.some((d) => d.id === state.dialogId) && state.dialogs[0]) {
+      state.dialogId = state.dialogs[0].id;
+    }
+    const cur = currentDialog();
+    if (cur && $("dialogTitle")) $("dialogTitle").textContent = cur.title || "Чат";
+    fillDialogSelect();
+  }
+
+  async function loadMessages() {
+    const feed = $("feed");
+    feed.querySelectorAll(".msg").forEach((el) => el.remove());
+    $("empty").hidden = false;
+    const msgs = await fetch("/api/chat/dialogs/" + encodeURIComponent(state.dialogId) + "/messages").then((r) => r.json());
+    (Array.isArray(msgs) ? msgs : []).forEach(upsertMessage);
+  }
+
+  async function refreshGroup() {
+    if (!isGroupDialog()) {
+      state.group = null;
+      $("groupPanel").hidden = true;
+      return;
+    }
+    const r = await fetch("/api/chat/groups/" + encodeURIComponent(state.dialogId));
+    if (!r.ok) return;
+    state.group = await r.json();
+    $("groupName").value = state.group.title || "";
+    $("groupAvatar").value = state.group.avatar || "";
+    $("groupDesc").value = state.group.description || "";
+    const ul = $("groupMembers");
+    ul.innerHTML = "";
+    (state.group.members || []).forEach((m) => {
+      const li = document.createElement("li");
+      const role = t(m.role) || m.role;
+      li.innerHTML = "<span></span><button type=\"button\" class=\"show-orig\"></button>";
+      li.querySelector("span").textContent = (m.user_id || "") + " · " + role + " · " + (m.lang || "");
+      const btn = li.querySelector("button");
+      const self = m.user_id === state.me;
+      const canKick = !self && state.group.role && state.group.role !== "member"
+        && (state.group.role === "owner" || m.role === "member");
+      if (canKick) {
+        btn.textContent = t("kick");
+        btn.addEventListener("click", async () => {
+          const out = await fetch("/api/chat/groups/" + encodeURIComponent(state.dialogId) + "/members/" + encodeURIComponent(m.user_id), { method: "DELETE" });
+          if (!out.ok) { toast("Ошибка " + out.status); return; }
+          refreshGroup();
+        });
+      } else {
+        btn.remove();
+      }
+      ul.appendChild(li);
+    });
+  }
+
+  async function switchDialog(id) {
+    state.dialogId = id;
+    fillDialogSelect();
+    const cur = currentDialog();
+    if (cur && $("dialogTitle")) $("dialogTitle").textContent = cur.title || "Чат";
+    await loadMessages();
+    if ($("groupPanel") && !$("groupPanel").hidden) await refreshGroup();
+    else {
+      const info = $("groupInfoBtn");
+      if (info) info.hidden = !isGroupDialog();
+    }
+  }
+
   async function boot() {
-    const [langs, dialogs, settings, chat] = await Promise.all([
+    const [langs, dialogs, settings, chat, me] = await Promise.all([
       fetch("/api/languages").then((r) => r.json()),
       fetch("/api/chat/dialogs").then((r) => r.json()),
       fetch("/api/settings").then((r) => r.json()),
       fetch("/api/chat").then((r) => r.json()).catch(() => ({})),
+      fetch("/api/auth/me").then((r) => r.ok ? r.json() : { id: "local" }).catch(() => ({ id: "local" })),
     ]);
+    state.me = (me && me.id) || "local";
+    state.dialogs = Array.isArray(dialogs) ? dialogs : [];
     state.uiLang = localStorage.getItem("ui_lang") || document.documentElement.lang || "ru";
     if (state.uiLang !== "en") state.uiLang = "ru";
     applyUiLang();
@@ -757,15 +923,107 @@
     });
     state.target = localStorage.getItem("target_lang") || settings.target_lang || "en";
     sel.value = state.target;
-    if (dialogs && dialogs[0]) {
-      state.dialogId = dialogs[0].id;
-      $("dialogTitle").textContent = dialogs[0].title || "Чат";
+    if (state.dialogs[0]) {
+      state.dialogId = state.dialogs[0].id;
+      $("dialogTitle").textContent = state.dialogs[0].title || "Чат";
     }
-    const msgs = await fetch("/api/chat/dialogs/" + encodeURIComponent(state.dialogId) + "/messages").then((r) => r.json());
-    msgs.forEach(upsertMessage);
-    sel.addEventListener("change", () => {
+    fillDialogSelect();
+    const invite = new URLSearchParams(location.search).get("invite");
+    if (invite) {
+      const joined = await fetch("/api/chat/groups/join", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ token: invite, lang: state.target }),
+      });
+      if (joined.ok) {
+        const g = await joined.json();
+        toast(t("joined"));
+        await loadDialogs();
+        if (g.id) await switchDialog(g.id);
+        history.replaceState({}, "", "/chat");
+      }
+    }
+    await loadMessages();
+    sel.addEventListener("change", async () => {
       state.target = sel.value;
       localStorage.setItem("target_lang", state.target);
+      if (isGroupDialog()) {
+        await fetch("/api/chat/groups/" + encodeURIComponent(state.dialogId) + "/members/" + encodeURIComponent(state.me), {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ lang: state.target }),
+        });
+      }
+    });
+    $("dialogSelect").addEventListener("change", () => switchDialog($("dialogSelect").value));
+    $("newGroupBtn").addEventListener("click", async () => {
+      const name = window.prompt(t("promptGroup"));
+      if (!name) return;
+      const r = await fetch("/api/chat/groups", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name, lang: state.target }),
+      });
+      const body = await r.json().catch(() => ({}));
+      if (!r.ok) { toast(body.detail || ("Ошибка " + r.status)); return; }
+      await loadDialogs();
+      await switchDialog(body.id);
+      $("groupPanel").hidden = false;
+      await refreshGroup();
+    });
+    $("groupInfoBtn").addEventListener("click", async () => {
+      $("groupPanel").hidden = false;
+      await refreshGroup();
+    });
+    $("groupPanelClose").addEventListener("click", () => { $("groupPanel").hidden = true; });
+    $("groupMetaForm").addEventListener("submit", async (ev) => {
+      ev.preventDefault();
+      const r = await fetch("/api/chat/groups/" + encodeURIComponent(state.dialogId), {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          name: $("groupName").value,
+          avatar: $("groupAvatar").value,
+          description: $("groupDesc").value,
+        }),
+      });
+      if (!r.ok) { toast("Ошибка " + r.status); return; }
+      await loadDialogs();
+      await refreshGroup();
+    });
+    $("addMemberForm").addEventListener("submit", async (ev) => {
+      ev.preventDefault();
+      const userId = $("addMemberId").value.trim();
+      if (!userId) return;
+      const r = await fetch("/api/chat/groups/" + encodeURIComponent(state.dialogId) + "/members", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ user_id: userId, lang: state.target }),
+      });
+      const body = await r.json().catch(() => ({}));
+      if (!r.ok) { toast(body.detail || ("Ошибка " + r.status)); return; }
+      $("addMemberId").value = "";
+      await refreshGroup();
+    });
+    $("inviteBtn").addEventListener("click", async () => {
+      const r = await fetch("/api/chat/groups/" + encodeURIComponent(state.dialogId) + "/invites", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ expires_in: 7 * 24 * 3600, max_uses: 20 }),
+      });
+      const body = await r.json().catch(() => ({}));
+      if (!r.ok) { toast(body.detail || ("Ошибка " + r.status)); return; }
+      const url = location.origin + (body.url || ("/chat?invite=" + body.token));
+      $("inviteOut").hidden = false;
+      $("inviteOut").textContent = t("inviteCopied") + ": " + url;
+      if (navigator.clipboard) navigator.clipboard.writeText(url).catch(() => {});
+    });
+    $("leaveBtn").addEventListener("click", async () => {
+      const r = await fetch("/api/chat/groups/" + encodeURIComponent(state.dialogId) + "/leave", { method: "POST" });
+      if (!r.ok) { toast("Ошибка " + r.status); return; }
+      $("groupPanel").hidden = true;
+      await loadDialogs();
+      if (state.dialogs[0]) await switchDialog(state.dialogs[0].id);
     });
     $("composer").addEventListener("input", () => {
       const has = !!$("composer").value.trim();

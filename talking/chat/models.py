@@ -14,7 +14,10 @@ from .edits import public_edit_fields
 
 MESSAGE_TYPES = ("text", "voice_note", "video_note")
 NOTE_TYPES = ("voice_note", "video_note")
-_ALIAS_KEYS = ("play_url", "kind", "type", "conversation_id", "dialog_id", "edited")
+_ALIAS_KEYS = (
+    "play_url", "kind", "type", "conversation_id", "dialog_id", "edited",
+    "original", "translation_status", "translation_reason",
+)
 
 
 @dataclass
@@ -23,9 +26,17 @@ class Dialog:
     title: str
     created_at: float
     updated_at: float
+    kind: str = "direct"
+    avatar: str | None = None
+    description: str | None = None
+    member_count: int | None = None
+    role: str | None = None
 
     def to_public(self) -> dict[str, Any]:
-        return asdict(self)
+        d = asdict(self)
+        if d.get("kind") not in ("group", "direct"):
+            d["kind"] = "direct"
+        return d
 
 
 @dataclass
@@ -59,6 +70,8 @@ class Message:
     # Server-only: persist in JSONL, never in to_public() / to_dict().
     original_text: str | None = None
     revisions: list[dict] = field(default_factory=list)
+    # Per-language translations for groups. JSONL only; to_public() overlays one lang.
+    translations: dict[str, dict] = field(default_factory=dict)
     extra: dict[str, Any] = field(default_factory=dict)
 
     @property
@@ -111,6 +124,27 @@ class Message:
             d["play_url"] = play_url
         return d
 
+    def overlay_for_lang(self, lang: str | None, play_url: str | None = None) -> dict[str, Any]:
+        """Public payload with the viewer's language filled in (groups)."""
+        d = self.to_public(play_url=play_url)
+        if not lang:
+            return d
+        row = (self.translations or {}).get(lang)
+        if row:
+            d["translation"] = row.get("text")
+            d["tgt_lang"] = lang
+            d["translation_provider"] = row.get("provider")
+            d["translation_status"] = row.get("status") or "ok"
+            if row.get("reason"):
+                d["translation_reason"] = row.get("reason")
+        elif self.tgt_lang == lang and self.translation:
+            d["translation_status"] = "ok"
+        else:
+            d["tgt_lang"] = lang
+        if d.get("translation") and d.get("text") and d["translation"] != d["text"]:
+            d["original"] = self.text
+        return d
+
     def to_dict(self) -> dict[str, Any]:
         """Wire shape for ``/api/chat/messages`` (never includes edit history)."""
         return self.to_public()
@@ -121,10 +155,11 @@ class Message:
         d.pop("play_url", None)
         d["original_text"] = self.original_text
         d["revisions"] = list(self.revisions or [])
+        d["translations"] = dict(self.translations or {})
         return d
 
     def to_admin(self) -> dict[str, Any]:
-        """Admin views must never see note transcripts (owner spec / M11)."""
+        """Admin views must never see message contents (owner spec / M11)."""
         return redact_for_admin(self.to_public())
 
     @classmethod
@@ -142,16 +177,19 @@ class Message:
 
 
 ADMIN_REDACT_FIELDS = (
+    "text", "original_text", "revisions", "translations", "urls", "preview",
     "transcript", "translation", "src_lang", "tgt_lang", "translation_provider",
     "transcript_status", "transcript_reason", "transcript_provider",
     "transcript_model", "transcript_created_at", "transcript_duration",
+    "translation_status", "original",
 )
 
 
 def redact_for_admin(public: dict[str, Any]) -> dict[str, Any]:
-    """Strip speech-to-text fields so an admin panel cannot read note text."""
+    """Strip message bodies so an admin panel cannot read dialogs or notes."""
     out = {k: v for k, v in public.items() if k not in ADMIN_REDACT_FIELDS}
     out["transcript_redacted"] = True
+    out["content_redacted"] = True
     return out
 
 

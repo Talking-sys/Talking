@@ -15,6 +15,7 @@ from typing import Any
 
 from talking.ids import check_id, secure_dir
 
+from .groups import GroupStore
 from .models import Dialog, Message
 
 DEFAULT_DIALOG_ID = "local"
@@ -26,6 +27,7 @@ class ChatStore:
         self.root = Path(root)
         self._lock = threading.Lock()
         secure_dir(self.root)
+        self.groups = GroupStore(self.root)
 
     def _user_root(self, user_id: str) -> Path:
         return secure_dir(self.root / check_id(user_id, "user_id"))
@@ -48,9 +50,15 @@ class ChatStore:
         out: list[Dialog] = []
         for item in raw if isinstance(raw, list) else []:
             try:
-                out.append(Dialog(id=item["id"], title=item.get("title") or DEFAULT_DIALOG_TITLE,
-                                  created_at=float(item["created_at"]),
-                                  updated_at=float(item.get("updated_at") or item["created_at"])))
+                out.append(Dialog(
+                    id=item["id"],
+                    title=item.get("title") or DEFAULT_DIALOG_TITLE,
+                    created_at=float(item["created_at"]),
+                    updated_at=float(item.get("updated_at") or item["created_at"]),
+                    kind=str(item.get("kind") or "direct"),
+                    avatar=item.get("avatar"),
+                    description=item.get("description"),
+                ))
             except (KeyError, TypeError, ValueError):
                 continue
         return out
@@ -77,7 +85,17 @@ class ChatStore:
     def list_dialogs(self, user_id: str) -> list[Dialog]:
         self.ensure_default_dialog(user_id)
         with self._lock:
-            return self._load_dialogs(user_id)
+            personal = self._load_dialogs(user_id)
+        groups = self.groups.dialogs_for(user_id)
+        seen = {d.id for d in personal}
+        return personal + [g for g in groups if g.id not in seen]
+
+    def is_group(self, dialog_id: str) -> bool:
+        try:
+            dialog_id = check_id(dialog_id, "dialog_id")
+        except ValueError:
+            return False
+        return self.groups.get(dialog_id) is not None
 
     def get_dialog(self, user_id: str, dialog_id: str) -> Dialog:
         dialog_id = check_id(dialog_id, "dialog_id")
@@ -98,6 +116,8 @@ class ChatStore:
 
     def add_message(self, user_id: str, msg: Message) -> Message:
         self.get_dialog(user_id, msg.dialog_id)
+        if self.groups.get(msg.dialog_id) is not None:
+            return self.groups.add_message(msg)
         line = json.dumps(msg.to_storage(), ensure_ascii=False)
         with self._lock:
             p = self._messages_path(user_id, msg.dialog_id)
@@ -112,6 +132,10 @@ class ChatStore:
 
     def update_message(self, user_id: str, msg: Message) -> Message:
         """Rewrite one JSONL line (STT backfill, text edits)."""
+        if self.groups.get(msg.dialog_id) is not None:
+            if not self.groups.is_member(msg.dialog_id, user_id):
+                raise KeyError("dialog not found")
+            return self.groups.update_message(msg)
         with self._lock:
             p = self._messages_path(user_id, msg.dialog_id)
             if not p.exists():
@@ -135,6 +159,8 @@ class ChatStore:
 
     def list_messages(self, user_id: str, dialog_id: str, *, limit: int = 100) -> list[Message]:
         self.get_dialog(user_id, dialog_id)
+        if self.groups.get(dialog_id) is not None:
+            return self.groups.list_messages(dialog_id, limit=limit)
         p = self._messages_path(user_id, dialog_id)
         if not p.exists():
             return []
@@ -174,6 +200,10 @@ class ChatStore:
             message_id = check_id(message_id, "message_id")
         except ValueError:
             return None
+        if self.groups.get(dialog_id) is not None:
+            if not self.groups.is_member(dialog_id, user_id):
+                return None
+            return self.groups.delete_message(dialog_id, message_id)
         removed: Message | None = None
         with self._lock:
             p = self._messages_path(user_id, dialog_id)
@@ -208,6 +238,9 @@ class ChatStore:
         cutoff = time.time() - max_age_s
         gone: list[Message] = []
         for d in self.list_dialogs(user_id):
+            if d.kind == "group" or self.groups.get(d.id) is not None:
+                gone.extend(self.groups.purge_older_than(d.id, max_age_s))
+                continue
             with self._lock:
                 p = self._messages_path(user_id, d.id)
                 if not p.exists():

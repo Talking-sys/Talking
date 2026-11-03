@@ -21,11 +21,17 @@ class MessageTranslationCache:
 
     def store(self, message_id: str, text: str, src: str, tgt: str, translation: str) -> None:
         k = _key(text, src, tgt)
+        keyed = f"{message_id}\x1f{tgt}"
         with self._lock:
-            old = self._by_msg.get(message_id)
-            if old and old != k:
-                self._vals.pop(old, None)
-            self._by_msg[message_id] = k
+            for mid in (message_id, keyed):
+                old = self._by_msg.get(mid)
+                if old and old != k:
+                    # Keep other-language rows for the same message.
+                    if mid == message_id:
+                        pass
+                    else:
+                        self._vals.pop(old, None)
+                self._by_msg[mid] = k
             self._vals[k] = translation
 
     def get(self, text: str, src: str, tgt: str) -> str | None:
@@ -39,9 +45,12 @@ class MessageTranslationCache:
 
     def invalidate_message(self, message_id: str, old_text: str | None = None) -> None:
         with self._lock:
-            k = self._by_msg.pop(message_id, None)
-            if k:
-                self._vals.pop(k, None)
+            drop_ids = [mid for mid in self._by_msg
+                        if mid == message_id or mid.startswith(message_id + "\x1f")]
+            for mid in drop_ids:
+                k = self._by_msg.pop(mid, None)
+                if k:
+                    self._vals.pop(k, None)
             if old_text:
                 drop = [key for key in self._vals if key.endswith("\x1f" + old_text)]
                 for key in drop:

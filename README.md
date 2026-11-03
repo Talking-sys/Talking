@@ -76,6 +76,9 @@ Compose sets `DATABASE_URL` and `REDIS_URL`. The app still runs if those pings f
 | `CHAT_MSG_RATE_PER_MIN` | `10` | Spec: 10 messages / min |
 | `CHAT_EDIT_WINDOW_S` | `172800` | Telegram-like edit window (seconds from send; `0` = unlimited) |
 | `CHAT_EDIT_RATE_PER_MIN` | `20` | PATCH edits / IP |
+| `CHAT_GROUP_MAX_MEMBERS` | `20` | Group size cap (GPL). Trial uses `CHAT_GROUP_TRIAL_MAX_MEMBERS` when the commercial API is configured |
+| `CHAT_GROUP_TRIAL_MAX_MEMBERS` | `5` | Commercial trial/free group cap |
+| `CHAT_GROUP_INVITE_TTL_S` | `604800` | Default invite link lifetime (7 days, max 30) |
 
 Never commit `.env` or keys. GPL TTS (`edge-tts`, piper / espeak-ng) is listed in `requirements-optional.txt` and stays **disabled**.
 

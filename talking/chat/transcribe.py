@@ -379,11 +379,22 @@ class TranscriptionService:
                 self._inflight.pop(message_id, None)
 
     def _publish(self, user_id: str, msg: Message) -> None:
-        public = self._public(user_id, msg)
         payload = transcript_view(msg)
+        targets = [user_id]
         try:
-            self.hub.publish(user_id, {"type": "chat.message", "message": public})
-            self.hub.publish(user_id, {"type": "chat.transcript", "message_id": msg.id,
-                                       "status": payload["status"], "transcript": payload})
+            if self.store.is_group(msg.dialog_id):
+                g = self.store.groups.get(msg.dialog_id)
+                if g is not None:
+                    targets = g.member_ids()
+            for uid in targets:
+                public = self._public(uid, msg)
+                self.hub.publish(uid, {"type": "chat.message", "message": public})
+                self.hub.publish(uid, {
+                    "type": "chat.transcript",
+                    "message_id": msg.id,
+                    "dialog_id": msg.dialog_id,
+                    "status": payload["status"],
+                    "transcript": payload,
+                })
         except Exception:
             log.debug("transcript hub publish failed", exc_info=True)
