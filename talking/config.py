@@ -101,6 +101,17 @@ class Settings:
     commercial_api_token: str = field(default_factory=lambda: _env("COMMERCIAL_API_TOKEN", ""))
     commercial_webhook_secret: str = field(default_factory=lambda: _env("COMMERCIAL_WEBHOOK_SECRET", ""))
 
+    # Chat notes slice (Telegram-style voice_note / video_note). M4/M5 reuse these caps.
+    chat_voice_max_bytes: int = field(default_factory=lambda: _env_int("CHAT_VOICE_MAX_BYTES", 8 * 1024 * 1024))
+    chat_video_max_bytes: int = field(default_factory=lambda: _env_int("CHAT_VIDEO_MAX_BYTES", 25 * 1024 * 1024))
+    chat_quota_bytes: int = field(default_factory=lambda: _env_int("CHAT_QUOTA_BYTES", 500 * 1024 * 1024))
+    chat_note_max_ms: int = field(default_factory=lambda: _env_int("CHAT_NOTE_MAX_MS", 60_000))
+    chat_msg_per_min: int = field(default_factory=lambda: _env_int("CHAT_MSG_PER_MIN", 10))
+    chat_upload_per_min: int = field(default_factory=lambda: _env_int("CHAT_UPLOAD_PER_MIN", 20))
+    chat_play_token_ttl: int = field(default_factory=lambda: _env_int("CHAT_PLAY_TOKEN_TTL", 600))
+    chat_download_token_ttl: int = field(default_factory=lambda: _env_int("CHAT_DOWNLOAD_TOKEN_TTL", 120))
+    chat_transcribe: bool = field(default_factory=lambda: _env_bool("CHAT_TRANSCRIBE", True))
+
     @property
     def production(self) -> bool:
         return self.app_env.lower() in ("production", "prod")

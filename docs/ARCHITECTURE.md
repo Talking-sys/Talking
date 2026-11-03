@@ -73,7 +73,7 @@ talking/                 GPL open core package
   buffer.py / offline_queue.py / archive.py
   commands.py / languages.py
   commercial/            HTTP client + stubs (no proprietary code)
-  chat/                  placeholder (M4)
+  chat/                  notes slice (voice_note / video_note); M4 extends this
   games/                 placeholder (M8)
   static/                mobile-first HTML/JS
 docs/specs/              owner spec, human contribution evidence
@@ -86,5 +86,5 @@ docs/specs/              owner spec, human contribution evidence
 | 3-minute live buffer | SQLite + WAV on disk | same |
 | Offline queue | JSONL ring, delete after ACK | same |
 | History > 3 min | local JSONL; S3 if `S3_*` set | Cloudflare R2 |
-| Accounts / chat | — | Postgres (Neon / Aurora) |
+| Accounts / chat | file-backed dialogs + notes (`data/chat/`) | Postgres (Neon / Aurora) in M4 |
 | Rate limits / pubsub | in-process | Redis |

@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="theme-color" content="#0b1220">
+  <title>{{APP_NAME}} — кружочки</title>
+  <link rel="icon" href="/static/logo.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/static/app.css">
+  <link rel="stylesheet" href="/static/chat.css">
+</head>
+<body class="chat-page">
+  <header class="top">
+    <a class="back" href="/" aria-label="Назад к переводчику">←</a>
+    <img class="logo" src="/static/logo.svg" alt="">
+    <div class="brand">
+      <strong id="dialogTitle">Чат</strong>
+      <small id="net">кружочки · заметки</small>
+    </div>
+    <label class="field lang-mini">
+      <span class="sr-only">Язык перевода заметок</span>
+      <select id="target" aria-label="Язык перевода заметок"></select>
+    </label>
+  </header>
+
+  <main id="feed" class="chat-feed" aria-live="polite">
+    <p id="empty" class="empty">Короткое нажатие справа переключает голос и кружочек. Удерживайте, чтобы записать; влево — отмена; вверх — замок.</p>
+  </main>
+
+  <div id="recordOverlay" class="record-overlay" hidden>
+    <p id="recordStatus" class="sr-only" aria-live="assertive"></p>
+    <div class="lock-target" id="lockTarget" aria-hidden="true">Замок</div>
+    <div class="record-stage">
+      <div id="circleWrap" class="circle-wrap" hidden>
+        <svg class="ring" viewBox="0 0 120 120" aria-hidden="true">
+          <circle class="ring-bg" cx="60" cy="60" r="54"></circle>
+          <circle id="ringFg" class="ring-fg" cx="60" cy="60" r="54"></circle>
+        </svg>
+        <video id="preview" class="circle-preview" playsinline muted autoplay></video>
+      </div>
+      <canvas id="waveLive" class="wave-live" width="280" height="64" hidden></canvas>
+      <div id="timer" class="timer" aria-hidden="true">0:00</div>
+      <p id="hint" class="record-hint">Удерживайте · влево отмена · вверх замок</p>
+    </div>
+    <div id="lockBar" class="lock-bar" hidden>
+      <button id="btnStop" type="button">Стоп</button>
+      <button id="btnSend" type="button">Отправить</button>
+      <button id="btnTrash" type="button">Отмена</button>
+    </div>
+    <p id="slideCancel" class="slide-cancel" aria-hidden="true">← Отмена</p>
+  </div>
+
+  <form id="composerForm" class="composer" autocomplete="off">
+    <label class="sr-only" for="composer">Сообщение, до 500 символов</label>
+    <textarea id="composer" maxlength="500" rows="1" placeholder="Сообщение" enterkeyhint="send"></textarea>
+    <button id="recordBtn" type="button" class="record-btn" data-mode="voice"
+            aria-label="Голосовая заметка. Короткое нажатие — кружочек, удержание — запись. Влево отмена, вверх замок.">
+      <span class="record-icon" aria-hidden="true"></span>
+    </button>
+    <button id="sendText" type="submit" class="send-text" hidden>Отправить</button>
+  </form>
+
+  <div id="toast" class="toast" hidden></div>
+  <footer>
+    <a href="/">Переводчик</a> · <a href="/privacy">Privacy</a> · v{{VERSION}} · {{CONTACT}}
+  </footer>
+  <script src="/static/record-gestures.js"></script>
+  <script src="/static/chat.js"></script>
+</body>
+</html>

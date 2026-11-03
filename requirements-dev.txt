@@ -5,3 +5,4 @@ httpx>=0.27
 pip-audit>=2.7
 bandit>=1.7
 pip-licenses>=4.4
+playwright>=1.40

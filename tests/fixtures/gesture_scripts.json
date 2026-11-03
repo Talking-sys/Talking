@@ -1,0 +1,147 @@
+[
+  {
+    "name": "short tap toggles voice to video",
+    "steps": [
+      {"op": "down", "x": 0, "y": 0, "t": 0},
+      {"op": "up", "x": 0, "y": 0, "t": 100}
+    ],
+    "expect": {"mode": "video", "phase": "idle", "action": "toggle"}
+  },
+  {
+    "name": "second short tap toggles back to voice",
+    "steps": [
+      {"op": "down", "x": 0, "y": 0, "t": 0},
+      {"op": "up", "x": 0, "y": 0, "t": 80},
+      {"op": "down", "x": 0, "y": 0, "t": 200},
+      {"op": "up", "x": 0, "y": 0, "t": 300}
+    ],
+    "expect": {"mode": "voice", "phase": "idle", "action": "toggle"}
+  },
+  {
+    "name": "tap with slop still toggles",
+    "steps": [
+      {"op": "down", "x": 0, "y": 0, "t": 0},
+      {"op": "move", "x": 8, "y": -4, "t": 50},
+      {"op": "up", "x": 8, "y": -4, "t": 90}
+    ],
+    "expect": {"mode": "video", "phase": "idle", "action": "toggle"}
+  },
+  {
+    "name": "hold past tap starts recording then release sends",
+    "steps": [
+      {"op": "down", "x": 0, "y": 0, "t": 0},
+      {"op": "tick", "t": 250},
+      {"op": "up", "x": 2, "y": 2, "t": 900}
+    ],
+    "expect": {"mode": "voice", "phase": "idle", "action": "send"}
+  },
+  {
+    "name": "slide left then release cancels",
+    "steps": [
+      {"op": "down", "x": 200, "y": 200, "t": 0},
+      {"op": "tick", "t": 250},
+      {"op": "move", "x": 120, "y": 200, "t": 400},
+      {"op": "up", "x": 100, "y": 205, "t": 500}
+    ],
+    "expect": {"phase": "idle", "action": "cancel"}
+  },
+  {
+    "name": "slide back from cancel zone then release sends",
+    "steps": [
+      {"op": "down", "x": 200, "y": 200, "t": 0},
+      {"op": "tick", "t": 250},
+      {"op": "move", "x": 100, "y": 200, "t": 400},
+      {"op": "move", "x": 200, "y": 200, "t": 500},
+      {"op": "up", "x": 200, "y": 200, "t": 600}
+    ],
+    "expect": {"phase": "idle", "action": "send"}
+  },
+  {
+    "name": "slide up locks hands-free; release does not send",
+    "steps": [
+      {"op": "down", "x": 200, "y": 400, "t": 0},
+      {"op": "tick", "t": 250},
+      {"op": "move", "x": 200, "y": 300, "t": 400},
+      {"op": "up", "x": 200, "y": 300, "t": 500}
+    ],
+    "expect": {"phase": "locked", "action": null}
+  },
+  {
+    "name": "locked send button sends",
+    "steps": [
+      {"op": "down", "x": 0, "y": 100, "t": 0},
+      {"op": "tick", "t": 250},
+      {"op": "move", "x": 0, "y": 0, "t": 400},
+      {"op": "lock_send"}
+    ],
+    "expect": {"phase": "idle", "action": "send"}
+  },
+  {
+    "name": "locked stop then trash cancels",
+    "steps": [
+      {"op": "down", "x": 0, "y": 100, "t": 0},
+      {"op": "tick", "t": 250},
+      {"op": "move", "x": 0, "y": 0, "t": 400},
+      {"op": "lock_stop"},
+      {"op": "cancel"}
+    ],
+    "expect": {"phase": "idle", "action": "cancel"}
+  },
+  {
+    "name": "locked stop then send",
+    "steps": [
+      {"op": "down", "x": 0, "y": 100, "t": 0},
+      {"op": "tick", "t": 250},
+      {"op": "move", "x": 0, "y": 0, "t": 400},
+      {"op": "lock_stop"},
+      {"op": "lock_send"}
+    ],
+    "expect": {"phase": "idle", "action": "send"}
+  },
+  {
+    "name": "60s cap auto-sends while holding",
+    "steps": [
+      {"op": "down", "x": 0, "y": 0, "t": 0},
+      {"op": "tick", "t": 250},
+      {"op": "tick", "t": 60000}
+    ],
+    "expect": {"phase": "idle", "action": "send"}
+  },
+  {
+    "name": "60s cap auto-sends while locked",
+    "steps": [
+      {"op": "down", "x": 0, "y": 200, "t": 0},
+      {"op": "tick", "t": 250},
+      {"op": "move", "x": 0, "y": 100, "t": 400},
+      {"op": "tick", "t": 60000}
+    ],
+    "expect": {"phase": "idle", "action": "send"}
+  },
+  {
+    "name": "escape cancels an armed press",
+    "steps": [
+      {"op": "down", "x": 0, "y": 0, "t": 0},
+      {"op": "cancel"}
+    ],
+    "expect": {"phase": "idle", "action": "cancel"}
+  },
+  {
+    "name": "cannot toggle while recording",
+    "steps": [
+      {"op": "down", "x": 0, "y": 0, "t": 0},
+      {"op": "tick", "t": 300},
+      {"op": "down", "x": 0, "y": 0, "t": 400}
+    ],
+    "expect": {"mode": "voice", "phase": "recording"}
+  },
+  {
+    "name": "dominant horizontal slide is cancel not lock",
+    "steps": [
+      {"op": "down", "x": 200, "y": 200, "t": 0},
+      {"op": "tick", "t": 250},
+      {"op": "move", "x": 100, "y": 160, "t": 400},
+      {"op": "up", "x": 100, "y": 160, "t": 450}
+    ],
+    "expect": {"phase": "idle", "action": "cancel"}
+  }
+]

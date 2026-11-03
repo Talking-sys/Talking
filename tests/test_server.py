@@ -32,9 +32,8 @@ def test_languages_and_settings(make_client):
     assert r.json()["target_lang"] == "de"
 
 
-def test_chat_and_games_are_placeholders(make_client):
+def test_games_is_placeholder(make_client):
     c = make_client()
-    assert c.get("/api/chat").status_code == 501
     assert c.get("/api/games").status_code == 501
 
 

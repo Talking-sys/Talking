@@ -4,7 +4,7 @@ Real-time two-way speech translation. **Open core, GPL v3.**
 
 Copyright (C) 2026 hateaboutyouone. Contact: **hateaboutyou111@icloud.com**.
 
-Stage **v0.1.0** is a runnable skeleton: FastAPI + WebSocket, Whisper STT, Grok/free/stub translation, 3-minute buffer, offline JSONL queue, mobile-first HTML mic UI. Chat, games, auth, and all monetization ship as later modules (`docs/ROADMAP.md`). Commercial admin / licensing / Talk-coins / P2P / analytics live in a **separate proprietary repo** and talk to this core **only over HTTP/WS** — see `docs/ARCHITECTURE.md` and `NOTICE.md`.
+Stage **v0.1.0** is a runnable skeleton: FastAPI + WebSocket, Whisper STT, Grok/free/stub translation, 3-minute buffer, offline JSONL queue, mobile-first HTML mic UI. A thin **chat notes** slice (`/chat`) adds Telegram-style voice notes and round video notes (кружочки). Full chat, games, auth, and all monetization ship as later modules (`docs/ROADMAP.md`). Commercial admin / licensing / Talk-coins / P2P / analytics live in a **separate proprietary repo** and talk to this core **only over HTTP/WS** — see `docs/ARCHITECTURE.md` and `NOTICE.md`.
 
 This README is not legal advice.
 
@@ -32,6 +32,8 @@ Tests (fake STT + stub translator, no model download):
 
 ```bash
 pytest -q
+# notes smoke uses Playwright Chromium + fake media devices:
+python -m playwright install chromium   # once
 ```
 
 ## Docker
@@ -71,6 +73,7 @@ Never commit `.env` or keys. GPL TTS (`edge-tts`, piper / espeak-ng) is listed i
 3. Tap the mic. Client VAD cuts on pause; server VAD is the fallback.
 4. Say «переведи на немецкий» to switch target locally (no API).
 5. If the other person speaks the target language, speech is translated back.
+6. Open `/chat` for кружочки: short tap on the record button toggles voice ↔ round video; hold to record; release to send; slide left to cancel; slide up to lock.
 
 ## Hosting outline (expand later)
 

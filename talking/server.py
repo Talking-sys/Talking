@@ -12,7 +12,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 
 from . import __version__
-from .chat import not_implemented as chat_stub
+from .chat.routes import register_chat
 from .commercial.client import verify_webhook
 from .config import Settings, WHISPER_MODELS
 from .engine import Engine
@@ -207,11 +207,9 @@ def create_app(settings: Settings | None = None, engine: Engine | None = None) -
         eng.set_force_offline(bool(data.get("value", True)))
         return eng.status()
 
-    # --- Open-core placeholders (future modules) ---
-    @app.get("/api/chat")
-    def chat_placeholder():
-        return JSONResponse(chat_stub(), status_code=501)
+    register_chat(app)
 
+    # --- Open-core placeholders (future modules) ---
     @app.get("/api/games")
     def games_placeholder():
         return JSONResponse(games_stub(), status_code=501)
