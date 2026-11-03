@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="theme-color" content="#0b1220">
+  <title>{{APP_NAME}} — аккаунт</title>
+  <link rel="icon" href="/static/logo.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+  <header class="top">
+    <a class="nav-chat" href="/" aria-label="Назад">←</a>
+    <img class="logo" src="/static/logo.svg" alt="">
+    <div class="brand">
+      <strong>{{APP_NAME}}</strong>
+      <small>Аккаунт, экспорт, удаление</small>
+    </div>
+  </header>
+  <main>
+    <section class="card" id="accountCard">
+      <h2>Профиль</h2>
+      <p class="hint" id="accountHint">Загрузка…</p>
+      <dl class="kv" id="profileKv" hidden></dl>
+      <p class="warn" id="deleteBanner" hidden></p>
+      <button type="button" id="cancelDelete" class="btn" hidden>Отменить удаление</button>
+    </section>
+    <section class="card" id="eventsCard">
+      <h2>Журнал безопасности</h2>
+      <p class="hint">Входы, смена методов, отзыв сессий. Секреты и IP не показываются.</p>
+      <ul class="plain" id="eventsList"></ul>
+    </section>
+    <section class="card" id="exportCard">
+      <h2>Экспорт данных</h2>
+      <p class="hint">JSON-архив ваших данных. Скачивание короткоживущее и требует сессии. Не чаще 3 раз в сутки.</p>
+      <button type="button" id="exportBtn" class="btn">Запросить экспорт</button>
+      <p class="hint" id="exportStatus"></p>
+      <a id="exportLink" hidden>Скачать JSON</a>
+    </section>
+    <section class="card danger-card" id="deleteCard">
+      <h2>Удалить аккаунт</h2>
+      <p class="hint">Нужен вход за последние 10 минут. После подтверждения действует пауза (по умолчанию 7 суток) — её можно отменить. Затем данные стираются или обезличиваются, сессии отзываются.</p>
+      <label class="field">
+        <span>Введите DELETE</span>
+        <input id="deleteConfirm" type="text" autocomplete="off" maxlength="16">
+      </label>
+      <button type="button" id="deleteBtn" class="btn danger">Удалить аккаунт</button>
+      <p class="hint" id="deleteStatus"></p>
+    </section>
+  </main>
+  <footer>
+    <a href="/">Переводчик</a> · <a href="/chat">Чат</a> ·
+    <a href="/privacy">Privacy</a> · v{{VERSION}} · {{CONTACT}}
+  </footer>
+  <div id="toast" class="toast" hidden></div>
+  <script src="/static/account.js"></script>
+</body>
+</html>

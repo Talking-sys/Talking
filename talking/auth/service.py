@@ -156,7 +156,7 @@ class AuthService:
         if sess.expires_at < utcnow():
             return None
         user = await self.store.get_user(sess.user_id)
-        if user is None or user.status != "active":
+        if user is None or user.status not in ("active", "deleting"):
             return None
         sess.last_seen_at = utcnow()
         await self.store.save_session(sess)
@@ -194,7 +194,7 @@ class AuthService:
         if rec is None or rec.used_at is not None:
             raise AuthError(401, "invalid_code")
         user = await self.store.get_user(rec.user_id)
-        if user is None or user.status != "active":
+        if user is None or user.status not in ("active", "deleting"):
             raise AuthError(401, "invalid_code")
         rec.used_at = utcnow()
         await self.store.save_recovery(rec)
@@ -218,6 +218,7 @@ class AuthService:
             raise AuthError(404, "not_found")
         sess.revoked_at = utcnow()
         await self.store.save_session(sess)
+        await self._event("session_revoke", user_id=user_id)
         return sess
 
     def public_user(self, user: UserRecord, *, methods: list | None = None, csrf: str | None = None) -> dict:
@@ -230,6 +231,11 @@ class AuthService:
             "profile_private": user.profile_private,
             "created_at": user.created_at.isoformat(),
         }
+        if user.status == "deleting":
+            body["delete_requested_at"] = (
+                user.delete_requested_at.isoformat() if user.delete_requested_at else None
+            )
+            body["delete_after"] = user.delete_after.isoformat() if user.delete_after else None
         if methods is not None:
             body["methods"] = methods
         if csrf is not None:
@@ -335,7 +341,7 @@ class AuthService:
             created = True
         else:
             user = await self.store.get_user(ident.user_id)
-            if user is None or user.status != "active":
+            if user is None or user.status not in ("active", "deleting"):
                 raise AuthError(401, "invalid_code")
         sess, refresh = await self.issue_session(user.id, ip=ip, user_agent=user_agent)
         await self._event("phone_verify", user_id=user.id, ip=ip, created=int(created))

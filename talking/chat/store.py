@@ -7,6 +7,7 @@ keep the same shapes.
 from __future__ import annotations
 
 import json
+import shutil
 import threading
 import time
 import uuid
@@ -233,3 +234,36 @@ class ChatStore:
                 tmp.write_text("\n".join(keep) + ("\n" if keep else ""), encoding="utf-8")
                 tmp.replace(p)
         return gone
+
+    def dump_user(self, user_id: str) -> list[dict[str, Any]]:
+        """Export dialogs + messages without creating empty trees."""
+        uid = check_id(user_id, "user_id")
+        root = self.root / uid
+        dialogs_path = root / "dialogs.json"
+        if not dialogs_path.exists():
+            return []
+        with self._lock:
+            dialogs = self._load_dialogs(uid)
+        out: list[dict[str, Any]] = []
+        for d in dialogs:
+            p = root / "messages" / f"{check_id(d.id, 'dialog_id')}.jsonl"
+            rows: list[dict[str, Any]] = []
+            if p.exists():
+                for line in p.read_text(encoding="utf-8").splitlines():
+                    if not line.strip():
+                        continue
+                    try:
+                        rows.append(json.loads(line))
+                    except json.JSONDecodeError:
+                        continue
+            out.append({"dialog": d.to_public(), "messages": rows})
+        return out
+
+    def purge_user(self, user_id: str) -> bool:
+        """Remove the per-user chat tree (messages + media sibling dirs)."""
+        uid = check_id(user_id, "user_id")
+        root = self.root / uid
+        if not root.exists():
+            return False
+        shutil.rmtree(root, ignore_errors=True)
+        return True

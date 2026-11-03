@@ -19,7 +19,7 @@ Talking will request **only non-sensitive** OpenID scopes. Phone SMS sign-in is 
 - [ ] No `access_type=offline` unless a refresh token is actually required (it should not be)
 - [ ] State + PKCE on the authorization code flow
 - [ ] Do not log ID tokens or `sub` in plaintext; hash user ids (`LOG_SALT`)
-- [ ] Account deletion path (Google Play / Apple also require this)
+- [x] Account deletion path (Google Play / Apple also require this) — `POST /api/auth/account/delete` (stage 7; Google/Apple sign-in itself is still later)
 - [ ] Matching emails do **not** auto-merge accounts
 
 This file is an engineering checklist, not a Google policy interpretation.

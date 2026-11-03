@@ -1,8 +1,9 @@
 """Auth HTTP routes, cookie helpers, and app wiring."""
 from __future__ import annotations
 
+import asyncio
 import logging
-from fastapi import FastAPI, HTTPException, Request, Response
+from fastapi import FastAPI, HTTPException, Query, Request, Response
 from fastapi.responses import JSONResponse
 
 from talking.db import make_engine, make_session_factory
@@ -12,12 +13,14 @@ from .crypto import (
     ACCESS_COOKIE,
     ACCESS_COOKIE_DEV,
     ACCESS_TTL_S,
+    FRESH_AUTH_S,
     REFRESH_COOKIE,
     REFRESH_COOKIE_DEV,
     REFRESH_TTL_S,
     load_encryption_key,
     phone_subject,
 )
+from .privacy import PrivacyService
 from .deps import AuthMiddleware, read_refresh_cookie, require_user
 from .logfilter import install_auth_log_filter
 from .phone_util import PhoneError, country_allowed, normalize_phone_channel, parse_e164
@@ -124,7 +127,14 @@ def build_auth_stack(settings, secret: bytes):
     )
     limiter = AuthRateLimiter(settings.redis_url)
     sockets = SocketRegistry()
-    return store, svc, limiter, sockets, engine
+    privacy = PrivacyService(
+        svc, sockets=sockets, data_dir=settings.data_dir,
+        grace_s=settings.auth_delete_grace_s,
+        export_ttl_s=settings.auth_export_ttl_s,
+        download_ttl_s=settings.auth_export_download_ttl_s,
+        events_retention_days=settings.auth_events_retention_days,
+    )
+    return store, svc, limiter, sockets, engine, privacy
 
 
 def attach_session_response(request: Request, body: dict, status: int = 200) -> JSONResponse:
@@ -140,12 +150,13 @@ def attach_session_response(request: Request, body: dict, status: int = 200) -> 
 
 def register_auth(app: FastAPI) -> None:
     s = app.state.settings
-    store, svc, limiter, sockets, engine = build_auth_stack(s, app.state.secret)
+    store, svc, limiter, sockets, engine, privacy = build_auth_stack(s, app.state.secret)
     app.state.auth_store = store
     app.state.auth = svc
     app.state.auth_limiter = limiter
     app.state.auth_sockets = sockets
     app.state.auth_engine = engine
+    app.state.privacy = privacy
     install_auth_log_filter(svc.log_salt)
     app.add_middleware(AuthMiddleware)
 
@@ -328,6 +339,128 @@ def register_auth(app: FastAPI) -> None:
             )
         except AuthError as e:
             raise _err(e)
+
+    def _accounts_only(request: Request):
+        user = require_user(request)
+        if user.auth_mode == "local":
+            raise HTTPException(400, "accounts_only")
+        return user
+
+    @app.get("/api/auth/account")
+    async def account_status(request: Request):
+        user = _accounts_only(request)
+        await privacy.process_due_deletions()
+        rec = user.user or await svc.store.get_user(user.id)
+        if rec is None:
+            raise HTTPException(401, "not signed in")
+        body = privacy.account_view(rec)
+        body["fresh_session"] = svc.session_is_fresh(user.session) if user.session else False
+        body["fresh_auth_s"] = FRESH_AUTH_S
+        return body
+
+    @app.post("/api/auth/account/delete")
+    async def account_delete(request: Request):
+        user = _accounts_only(request)
+        if not limiter.allow(f"auth:delete:uid:{user.id}", 5, 3600):
+            raise HTTPException(429, "rate limit")
+        data = await _json(request)
+        rec = user.user or await svc.store.get_user(user.id)
+        if rec is None:
+            raise HTTPException(401, "not signed in")
+        try:
+            out = await privacy.request_deletion(
+                rec, user.session, ip=client_ip(request),
+                confirm=str(data.get("confirm") or ""),
+            )
+        except AuthError as e:
+            raise _err(e)
+        if out.get("status") == "deleted":
+            resp = JSONResponse(out)
+            clear_session_cookies(resp, request)
+            return resp
+        return out
+
+    @app.post("/api/auth/account/delete/cancel")
+    async def account_delete_cancel(request: Request):
+        user = _accounts_only(request)
+        rec = user.user or await svc.store.get_user(user.id)
+        if rec is None:
+            raise HTTPException(401, "not signed in")
+        try:
+            return await privacy.cancel_deletion(rec, ip=client_ip(request))
+        except AuthError as e:
+            raise _err(e)
+
+    @app.get("/api/auth/events")
+    async def account_events(request: Request, limit: int = 50):
+        user = require_user(request)
+        if user.auth_mode == "local":
+            return {"events": [], "auth_mode": "local"}
+        if not limiter.allow(f"auth:events:uid:{user.id}", 60, 60):
+            raise HTTPException(429, "rate limit")
+        await privacy.process_due_deletions()
+        return {"events": await privacy.public_events(user.id, limit=limit)}
+
+    @app.post("/api/auth/export")
+    async def account_export(request: Request):
+        user = _accounts_only(request)
+        ip = client_ip(request)
+        if not limiter.allow(f"auth:export:uid:{user.id}", 3, 24 * 3600):
+            raise HTTPException(429, "rate limit")
+        if not limiter.allow(f"auth:export:ip:{ip}", 10, 24 * 3600):
+            raise HTTPException(429, "rate limit")
+        rec = user.user or await svc.store.get_user(user.id)
+        if rec is None:
+            raise HTTPException(401, "not signed in")
+        try:
+            job = await privacy.request_export(rec, ip=ip)
+        except AuthError as e:
+            raise _err(e)
+        await _kick_export(request.app, job.id)
+        return JSONResponse(privacy.public_export(job), status_code=202)
+
+    @app.get("/api/auth/export/{export_id}")
+    async def account_export_status(request: Request, export_id: str):
+        user = _accounts_only(request)
+        try:
+            job = await privacy.get_owned_export(user.id, export_id)
+        except AuthError as e:
+            raise _err(e)
+        return privacy.public_export(job, include_token=True)
+
+    @app.get("/api/auth/export/{export_id}/download")
+    async def account_export_download(
+        request: Request, export_id: str, token: str = Query(default=""),
+    ):
+        user = _accounts_only(request)
+        try:
+            job = await privacy.get_owned_export(user.id, export_id)
+        except AuthError as e:
+            raise _err(e)
+        if not privacy.verify_download_token(user.id, export_id, token):
+            raise HTTPException(403, "invalid_download_token")
+        try:
+            raw = privacy.read_export_bytes(job)
+        except AuthError as e:
+            raise _err(e)
+        filename = f"talking-export-{export_id[:8]}.json"
+        return Response(
+            content=raw,
+            media_type="application/json",
+            headers={
+                "Content-Disposition": f'attachment; filename="{filename}"',
+                "Cache-Control": "no-store",
+            },
+        )
+
+
+async def _kick_export(app: FastAPI, job_id: str) -> None:
+    privacy: PrivacyService = app.state.privacy
+    env = (app.state.settings.app_env or "").lower()
+    if env in ("test", "development", "dev", "local"):
+        await privacy.build_export(job_id)
+        return
+    asyncio.create_task(privacy.build_export(job_id))
 
 
 async def _json(request: Request) -> dict:
