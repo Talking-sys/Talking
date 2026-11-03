@@ -42,6 +42,8 @@ Transcription is **on-demand and premium-gated** (Telegram Premium-style
 `CHAT_TRANSCRIBE_ON_UPLOAD=1` restores the old auto-fill path but still requires
 `has_entitlement(user, "voice_transcription")`.
 
+Press-and-hold **voice translation** (live conversation + record-for-translation) lives on `/translate` and reuses this FSM, `decode_pcm16k`, and the same `transcript` / `translation` fields. See `docs/VOICE_TRANSLATION.md`.
+
 ## Limits (owner spec)
 
 - Notes ≤ 60 s

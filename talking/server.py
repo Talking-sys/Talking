@@ -17,6 +17,7 @@ from .chat.http import register_message_routes
 from .chat.messages import MessageStore
 from .chat.routes import register_chat
 from .chat.translation_cache import MessageTranslationCache
+from .voice_translate.routes import register_voice_translate
 from .commercial.client import verify_webhook
 from .config import Settings, WHISPER_MODELS
 from .engine import Engine
@@ -238,6 +239,7 @@ def create_app(settings: Settings | None = None, engine: Engine | None = None,
         return eng.status()
 
     register_chat(app)
+    register_voice_translate(app)
     if messages is None:
         messages = MessageStore(chat_store=app.state.chat_store)
     app.state.messages = messages

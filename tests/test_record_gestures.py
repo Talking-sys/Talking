@@ -33,7 +33,9 @@ def apply(machine: RecordGestureMachine, step: dict) -> dict:
 
 @pytest.mark.parametrize("script", SCRIPTS, ids=[s["name"] for s in SCRIPTS])
 def test_gesture_script(script):
-    machine = RecordGestureMachine(GestureConfig())
+    raw = dict(script.get("cfg") or {})
+    cfg = GestureConfig(**{k: v for k, v in raw.items() if k in GestureConfig.__dataclass_fields__})
+    machine = RecordGestureMachine(cfg)
     snap = None
     for step in script["steps"]:
         snap = apply(machine, step)

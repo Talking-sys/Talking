@@ -23,6 +23,7 @@
     this.lock_dy = opt.lock_dy != null ? opt.lock_dy : -72;
     this.max_ms = opt.max_ms != null ? opt.max_ms : 60000;
     this.slop_px = opt.slop_px != null ? opt.slop_px : 16;
+    this.enable_toggle = opt.enable_toggle != null ? !!opt.enable_toggle : true;
   }
 
   function RecordGestureMachine(cfg) {
@@ -80,6 +81,7 @@
       var dx = x - this._sx, dy = y - this._sy;
       var dist = Math.sqrt(dx * dx + dy * dy);
       if (this.phase === PHASE_ARMED && this.elapsed_ms < this.cfg.tap_ms && dist <= this.cfg.slop_px) {
+        if (!this.cfg.enable_toggle) return this._idle("tap");
         this.mode = this.mode === MODE_VOICE ? MODE_VIDEO : MODE_VOICE;
         return this._idle("toggle");
       }

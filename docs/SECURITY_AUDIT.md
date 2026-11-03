@@ -11,7 +11,7 @@ Contact: hateaboutyou111@icloud.com.
 | 3 | Admin | **Not in this repo** — stub `/api/commercial/admin/health` | Secret token in header or one-time cookie form, never in URL; 2FA. Admin must **not** read chat transcripts (`Message.to_admin()` redacts them). |
 | 4 | Licences | Stub `/api/commercial/license` | Signed licences, public key only in the client build, revocation list |
 | 5 | Docker | Non-root user 10001, no secrets in image, healthcheck | Read-only rootfs, dropped caps, no docker rebuild from admin by default |
-| 6 | Data | Local files 0700, no secrets in git; chat media UUID names + magic-byte sniff + expiring/one-time download tokens | Hashed user_id in logs, 3-minute auto-delete of translated segments, backup TTL |
+| 6 | Data | Local files 0700, no secrets in git; chat media UUID names + magic-byte sniff + expiring/one-time download tokens; live voice-translation PCM is never persisted | Hashed user_id in logs, 3-minute auto-delete of translated segments, backup TTL |
 | 7 | Dependencies | permissive/GPL-compatible `requirements.txt`; copyleft TTS optional and off | pip-audit + bandit gating, licence scan on CI |
 
 Do not store cards. Payment webhooks are verified in the proprietary service, not here.
