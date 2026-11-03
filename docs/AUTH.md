@@ -120,6 +120,25 @@ Flow:
 
 Phones and codes are never logged. Identity `subject` is HMAC, not the number.
 
+## Web UI (`/signin`, `/account`)
+
+Static pages on the existing cookie session. **No tokens in `localStorage`**
+(CSRF stays in memory; `ui_lang` may be stored like the rest of the app).
+
+- **Sign-in** (`/signin`): phone (country + number, SMS code, resend cooldown,
+  explicit “call me instead”), recovery code, continue anonymously. Google /
+  Apple / email / passkey **placeholders** render only when
+  `GET /api/auth/config` reports them enabled (`AUTH_GOOGLE`, `AUTH_APPLE`,
+  `AUTH_EMAIL`, `AUTH_PASSKEY`; default off). Those flows are still later stages.
+- **Account security** (`/account`): sessions and devices (revoke one, sign out
+  everywhere) and linked methods (add phone, unlink but never the last method).
+- Russian and English. One column on a phone, two columns from 840px.
+- Rate-limit errors (`429`, `resend_cooldown`, `attempts_exhausted`) have
+  dedicated copy.
+
+`GET /api/auth/config` is public (no cookie). `GET /api/auth/methods` still
+requires a session and lists **linked** identities; it also echoes `enabled`.
+
 ## Left for later stages (2–7)
 
 | Stage | Scope |
@@ -128,7 +147,7 @@ Phones and codes are never logged. Identity `subject` is HMAC, not the number.
 | 3 | Google OAuth (`openid email profile` only). No auto-merge on email. |
 | 4 | Passkeys / WebAuthn. |
 | 5 | Sign in with Apple, equal prominence, private relay. |
-| 6 | Onboarding screens (Google / Apple / email / passkey / phone / anonymous). |
+| 6 | Remaining onboarding chrome (profile, passkey create). Sign-in / sessions UI is in this PR. |
 | 7 | Account deletion, export, audit log UI; 90-day `auth_events` purge job. |
 
 ## Effort (implementation, not calendar)
@@ -143,4 +162,4 @@ phone: roughly **12–16 days** of implementation once secrets and provider acco
 See `.env.example`: `AUTH_MODE`, `PUBLIC_ORIGIN`, `LOG_SALT`, `DB_ENCRYPTION_KEY`,
 `DATABASE_URL`, `APP_SECRET_KEY`, `SMS_PROVIDER`, `TWILIO_ACCOUNT_SID`,
 `TWILIO_AUTH_TOKEN`, `TWILIO_VERIFY_SERVICE_SID`, `SMS_COUNTRY_ALLOWLIST`,
-`SMS_DEFAULT_REGION`.
+`SMS_DEFAULT_REGION`, `AUTH_GOOGLE`, `AUTH_APPLE`, `AUTH_EMAIL`, `AUTH_PASSKEY`.

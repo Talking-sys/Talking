@@ -111,6 +111,11 @@ class Settings:
     twilio_verify_service_sid: str = field(default_factory=lambda: _env("TWILIO_VERIFY_SERVICE_SID", ""))
     sms_country_allowlist: str = field(default_factory=lambda: _env("SMS_COUNTRY_ALLOWLIST", ""))
     sms_default_region: str = field(default_factory=lambda: _env("SMS_DEFAULT_REGION", ""))
+    # Future sign-in methods (stages 2–5). UI shows placeholders only when enabled.
+    auth_google: bool = field(default_factory=lambda: _env_bool("AUTH_GOOGLE", False))
+    auth_apple: bool = field(default_factory=lambda: _env_bool("AUTH_APPLE", False))
+    auth_email: bool = field(default_factory=lambda: _env_bool("AUTH_EMAIL", False))
+    auth_passkey: bool = field(default_factory=lambda: _env_bool("AUTH_PASSKEY", False))
 
     s3_endpoint: str = field(default_factory=lambda: _env("S3_ENDPOINT", ""))
     s3_bucket: str = field(default_factory=lambda: _env("S3_BUCKET", ""))

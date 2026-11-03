@@ -1,0 +1,115 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="theme-color" content="#0b1220">
+  <title>{{APP_NAME}} — вход</title>
+  <link rel="icon" href="/static/logo.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/static/app.css">
+  <link rel="stylesheet" href="/static/auth.css">
+</head>
+<body class="auth-page" data-page="signin">
+  <header class="top">
+    <a class="back" href="/" id="navBack" aria-label="Назад">←</a>
+    <img class="logo" src="/static/logo.svg" alt="">
+    <div class="brand">
+      <strong>{{APP_NAME}}</strong>
+      <small id="hdrSub">вход</small>
+    </div>
+    <div class="ui-lang" role="group" aria-label="Interface language">
+      <button type="button" id="uiLangRu" class="ui-lang-btn" aria-pressed="true" lang="ru">RU</button>
+      <button type="button" id="uiLangEn" class="ui-lang-btn" aria-pressed="false" lang="en">EN</button>
+    </div>
+  </header>
+
+  <main>
+    <p id="localBanner" class="auth-banner span-2" hidden data-i18n="localMode"></p>
+    <p id="errorBanner" class="auth-error span-2" hidden role="alert" data-testid="auth-error"></p>
+    <p id="okBanner" class="auth-ok span-2" hidden role="status"></p>
+
+    <div class="auth-grid" id="signinGrid">
+      <section class="card auth-card" id="phoneCard">
+        <h1 id="phoneTitle">Вход по телефону</h1>
+        <p class="hint" id="phoneHint">Код придёт по SMS. Звонок — только если вы сами нажмёте «позвоните мне».</p>
+        <form id="phoneForm" class="stack" autocomplete="tel">
+          <div class="phone-row">
+            <label class="field">
+              <span id="lblCountry">Страна</span>
+              <select id="phoneCountry" aria-label="Страна"></select>
+            </label>
+            <label class="field">
+              <span id="lblPhone">Номер</span>
+              <input id="phoneNational" type="tel" inputmode="tel" autocomplete="tel-national" maxlength="20">
+            </label>
+          </div>
+          <button type="submit" id="btnSendCode" class="btn btn-primary">Получить SMS-код</button>
+        </form>
+        <form id="codeForm" class="stack" hidden>
+          <p class="hint" id="codeHint"></p>
+          <label class="field">
+            <span id="lblCode">Код из SMS</span>
+            <input id="codeInput" class="code-input" type="text" inputmode="numeric" autocomplete="one-time-code"
+                   maxlength="8" pattern="[0-9]*">
+          </label>
+          <button type="submit" id="btnVerify" class="btn btn-primary">Войти</button>
+          <div class="btn-row two">
+            <button type="button" id="btnResend" class="btn" disabled>Отправить ещё раз</button>
+            <button type="button" id="btnCallMe" class="btn btn-ghost">Позвоните мне</button>
+          </div>
+          <button type="button" id="btnChangeNumber" class="btn btn-ghost">Другой номер</button>
+        </form>
+      </section>
+
+      <aside class="card auth-card" id="otherCard">
+        <h2 id="otherTitle">Другие способы</h2>
+        <div id="oauthBox" class="stack" hidden>
+          <div id="oauthRow" class="oauth-row">
+            <button type="button" id="oauthGoogle" class="btn" hidden>Google</button>
+            <button type="button" id="oauthApple" class="btn" hidden>Apple</button>
+          </div>
+          <button type="button" id="oauthEmail" class="btn" hidden>Почта</button>
+          <button type="button" id="oauthPasskey" class="btn" hidden>Passkey</button>
+        </div>
+        <p class="divider" id="orDivider">или</p>
+        <div class="auth-actions">
+          <button type="button" id="btnAnonymous" class="btn btn-primary">Продолжить анонимно</button>
+        </div>
+        <details class="details-block" id="recoveryDetails">
+          <summary id="recoverySummary">Есть код восстановления</summary>
+          <form id="recoveryForm" class="stack">
+            <label class="field">
+              <span id="lblRecovery">Код восстановления</span>
+              <input id="recoveryInput" type="text" autocomplete="off" spellcheck="false" maxlength="40">
+            </label>
+            <button type="submit" id="btnRecover" class="btn">Войти по коду</button>
+          </form>
+        </details>
+      </aside>
+    </div>
+
+    <section class="card auth-card span-2" id="recoveryOnce" hidden>
+      <h1 id="savedTitle">Сохраните код восстановления</h1>
+      <p class="hint" id="savedHint">Он показывается один раз. Без него анонимный аккаунт не вернуть.</p>
+      <pre id="recoveryCode" class="recovery-code"></pre>
+      <div class="btn-row two">
+        <button type="button" id="btnCopyRecovery" class="btn">Скопировать</button>
+      </div>
+      <label class="check">
+        <input id="savedCheck" type="checkbox">
+        <span id="savedLabel">Я сохранил код в надёжном месте</span>
+      </label>
+      <button type="button" id="btnSavedContinue" class="btn btn-primary" disabled>Продолжить</button>
+    </section>
+  </main>
+
+  <div id="toast" class="toast" hidden></div>
+  <footer>
+    <a href="/" id="ftHome">Переводчик</a> ·
+    <a href="/chat" id="ftChat">Чат</a> ·
+    <a href="/translate" id="ftVoice">Голос</a> ·
+    <a href="/privacy">Privacy</a> · v{{VERSION}} · {{CONTACT}}
+  </footer>
+  <script src="/static/auth.js"></script>
+</body>
+</html>
