@@ -36,10 +36,11 @@ a waveform bubble. Circles may autoplay **muted** while on screen.
 
 ## Transcripts
 
-If STT is already loaded (tests inject FakeSTT) and the audio can be decoded
-(WAV via stdlib; WebM/MP4/OGG via `ffmpeg` on PATH), the note gets `transcript`
-+ `translation`. Otherwise `transcript_status=skipped` and a reason is stored.
-Uploading a note does **not** load Whisper large-v3.
+Transcription is **on-demand and premium-gated** (Telegram Premium-style
+«Расшифровать»). Upload does **not** run STT. See `docs/VOICE_TRANSCRIPTION.md`.
+
+`CHAT_TRANSCRIBE_ON_UPLOAD=1` restores the old auto-fill path but still requires
+`has_entitlement(user, "voice_transcription")`.
 
 ## Limits (owner spec)
 

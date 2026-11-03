@@ -6,6 +6,9 @@ Designed so M4 can keep these paths and add nicks/groups beside them:
   GET/POST /api/chat/dialogs/{id}/messages
   POST /api/chat/upload
   POST /api/chat/dialogs/{id}/notes
+  POST /api/chat/messages/{id}/transcribe
+  GET  /api/chat/messages/{id}/transcript
+  DELETE /api/chat/messages/{id}
   GET  /api/chat/media/{id}
   POST /api/chat/media/{id}/token
   WS   /ws/chat
@@ -21,6 +24,7 @@ import uuid
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 
+from talking.commercial.client import ENTITLEMENT_VOICE_TRANSCRIPTION
 from talking.ids import check_id
 from talking.languages import WHISPER_LANGUAGES
 from talking.security import TokenBucket, client_ip, unsign
@@ -32,9 +36,10 @@ from .media import (
     DownloadTokens, MediaError, MediaLibrary,
     check_media_id, parse_waveform, validate_duration_ms, validate_kind,
 )
-from .models import MESSAGE_TYPES, Message
+from .models import MESSAGE_TYPES, NOTE_TYPES, Message, transcript_view
 from .notes import attach_transcript
 from .store import ChatStore
+from .transcribe import TranscriptionService
 
 log = logging.getLogger(__name__)
 TEXT_MAX = 500
@@ -98,6 +103,9 @@ def register_chat(app: FastAPI) -> None:
     app.state.chat_hub = ensure_hub(app)
     app.state.chat_msg_limiter = TokenBucket(s.chat_msg_per_min, burst=s.chat_msg_per_min)
     app.state.chat_upload_limiter = TokenBucket(s.chat_upload_per_min, burst=s.chat_upload_per_min)
+    app.state.chat_transcribe_limiter = TokenBucket(
+        s.chat_transcribe_per_min, burst=s.chat_transcribe_per_min,
+    )
 
     def _limit_msg(uid: str) -> None:
         if not app.state.chat_msg_limiter.allow(uid):
@@ -106,6 +114,63 @@ def register_chat(app: FastAPI) -> None:
     def _limit_upload(uid: str, ip: str) -> None:
         if not app.state.chat_upload_limiter.allow(uid) or not app.state.chat_upload_limiter.allow("ip:" + ip):
             raise HTTPException(429, "rate limit: too many uploads")
+
+    def _public_for(uid: str, msg: Message) -> dict:
+        return _public_message(app, uid, msg)
+
+    app.state.transcription = TranscriptionService(
+        engine=app.state.engine,
+        store=app.state.chat_store,
+        media=app.state.chat_media,
+        hub=app.state.chat_hub,
+        settings=s,
+        public_message=_public_for,
+    )
+
+    def _purge_retention(uid: str) -> None:
+        seconds = int(getattr(s, "chat_retention_seconds", 0) or 0)
+        if seconds <= 0:
+            return
+        for old in app.state.chat_store.purge_older_than(uid, seconds):
+            if old.media_id:
+                app.state.chat_media.delete(uid, old.media_id)
+
+    def _transcription_public(uid: str) -> dict:
+        decision = app.state.engine.commercial.check_entitlement(
+            uid, ENTITLEMENT_VOICE_TRANSCRIPTION,
+        )
+        free_mode = (s.chat_transcribe_free_mode or "lock").strip().lower()
+        if free_mode not in ("none", "lock", "teaser", "hidden"):
+            free_mode = "lock"
+        return {
+            "on_demand": True,
+            "enabled": bool(s.chat_transcribe),
+            "premium_required": True,
+            "entitlement": ENTITLEMENT_VOICE_TRANSCRIPTION,
+            "entitled": decision.entitled,
+            "source": decision.source,
+            "free_mode": free_mode,
+            "provider": (s.chat_stt_provider or "faster-whisper"),
+            "max_ms": s.chat_transcribe_max_ms,
+            "rate_per_min": s.chat_transcribe_per_min,
+        }
+
+    def _premium_or_403(uid: str):
+        decision = app.state.engine.commercial.check_entitlement(
+            uid, ENTITLEMENT_VOICE_TRANSCRIPTION,
+        )
+        if decision.entitled:
+            return decision
+        hint = {
+            "ru": "Расшифровка голосовых — функция Talking Premium.",
+            "en": "Voice transcription is a Talking Premium feature.",
+        }
+        raise HTTPException(403, {
+            "error": "premium_required",
+            "entitlement": ENTITLEMENT_VOICE_TRANSCRIPTION,
+            "source": decision.source,
+            "hint": hint,
+        })
 
     @app.get("/chat", response_class=HTMLResponse)
     def chat_page():
@@ -135,6 +200,7 @@ def register_chat(app: FastAPI) -> None:
                 "messages_per_min": s.chat_msg_per_min,
             },
             "quota": q,
+            "transcription": _transcription_public(uid),
         }
 
     @app.get("/api/chat/dialogs")
@@ -153,6 +219,7 @@ def register_chat(app: FastAPI) -> None:
     @app.get("/api/chat/dialogs/{dialog_id}/messages")
     def list_messages(request: Request, dialog_id: str, limit: int = 100):
         uid = _user_id(request)
+        _purge_retention(uid)
         try:
             msgs = app.state.chat_store.list_messages(uid, dialog_id, limit=min(max(limit, 1), 500))
         except (ValueError, KeyError) as e:
@@ -237,9 +304,11 @@ def register_chat(app: FastAPI) -> None:
             mime=stored.mime,
             size=stored.size,
             waveform=waveform,
-            transcript_status="pending",
         )
-        attach_transcript(app.state.engine, msg, stored, data, target_lang)
+        # On-demand by default. Optional legacy auto-STT is still premium-gated.
+        if s.chat_transcribe_on_upload and s.chat_transcribe:
+            if app.state.engine.commercial.has_entitlement(uid, ENTITLEMENT_VOICE_TRANSCRIPTION):
+                attach_transcript(app.state.engine, msg, stored, data, target_lang)
         app.state.chat_store.add_message(uid, msg)
         return msg
 
@@ -344,6 +413,73 @@ def register_chat(app: FastAPI) -> None:
         public = _public_message(app, uid, msg)
         app.state.chat_hub.publish(uid, {"type": "chat.message", "message": public})
         return JSONResponse(public, status_code=201)
+
+    @app.post("/api/chat/messages/{message_id}/transcribe")
+    async def transcribe_message(request: Request, message_id: str):
+        uid = _user_id(request)
+        _purge_retention(uid)
+        if not s.chat_transcribe:
+            raise HTTPException(503, "transcription disabled")
+        try:
+            message_id = check_id(message_id, "message_id")
+        except ValueError:
+            raise HTTPException(404, "message not found")
+        msg = app.state.chat_store.find_message(uid, message_id)
+        if msg is None:
+            raise HTTPException(404, "message not found")
+        if msg.type not in NOTE_TYPES:
+            raise HTTPException(400, "not a voice or video note")
+        cap = int(s.chat_transcribe_max_ms or s.chat_note_max_ms)
+        if msg.duration_ms and msg.duration_ms > cap:
+            raise HTTPException(400, f"note exceeds transcription cap of {cap} ms")
+        svc: TranscriptionService = app.state.transcription
+        if svc.cached_done(msg):
+            return transcript_view(msg) | {"message": _public_message(app, uid, msg)}
+        _premium_or_403(uid)
+        if not app.state.chat_transcribe_limiter.allow(uid):
+            raise HTTPException(429, "rate limit: too many transcriptions")
+        body = {}
+        if request.headers.get("content-type", "").startswith("application/json"):
+            try:
+                body = await request.json()
+            except json.JSONDecodeError:
+                body = {}
+        tgt = (body.get("target_lang") if isinstance(body, dict) else None) or None
+        if tgt and tgt not in WHISPER_LANGUAGES:
+            raise HTTPException(400, "unknown target_lang")
+        updated = svc.request(uid, msg, target_lang=tgt)
+        return transcript_view(updated) | {"message": _public_message(app, uid, updated)}
+
+    @app.get("/api/chat/messages/{message_id}/transcript")
+    def get_transcript(request: Request, message_id: str):
+        uid = _user_id(request)
+        _purge_retention(uid)
+        try:
+            message_id = check_id(message_id, "message_id")
+        except ValueError:
+            raise HTTPException(404, "message not found")
+        msg = app.state.chat_store.find_message(uid, message_id)
+        if msg is None:
+            raise HTTPException(404, "message not found")
+        if msg.type not in NOTE_TYPES:
+            raise HTTPException(400, "not a voice or video note")
+        return transcript_view(msg) | {"message": _public_message(app, uid, msg)}
+
+    @app.delete("/api/chat/messages/{message_id}")
+    def delete_message(request: Request, message_id: str):
+        uid = _user_id(request)
+        try:
+            message_id = check_id(message_id, "message_id")
+        except ValueError:
+            raise HTTPException(404, "message not found")
+        msg = app.state.chat_store.find_message(uid, message_id)
+        if msg is None:
+            raise HTTPException(404, "message not found")
+        removed = app.state.chat_store.delete_message(uid, msg.dialog_id, msg.id)
+        if removed and removed.media_id:
+            app.state.chat_media.delete(uid, removed.media_id)
+        app.state.chat_hub.publish(uid, {"type": "chat.deleted", "message_id": message_id})
+        return {"ok": True, "id": message_id}
 
     @app.websocket("/ws/chat")
     async def ws_chat(ws: WebSocket, t: str = ""):

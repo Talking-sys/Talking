@@ -7,6 +7,7 @@ Unified after merging notes (PR #3), link previews (PR #5), and edits (PR #6):
 - ``hub.ChatHub`` + ``/ws/chat`` — one hub (``events.register_chat_ws`` is a no-op)
 - ``http.py`` keeps ``GET/POST/PATCH /api/chat/messages`` on the same store
 - ``routes.py`` keeps dialog/notes/media paths
+- On-demand premium transcription in ``transcribe.py``
 
 Not in this slice: unique nicks, prefix search, groups, block lists, stickers,
 polls, 3-minute auto-delete. See ``docs/CHAT_NOTES.md`` and ``docs/CHAT_EDITING.md``.
@@ -14,7 +15,7 @@ polls, 3-minute auto-delete. See ``docs/CHAT_NOTES.md`` and ``docs/CHAT_EDITING.
 
 STAGE = "notes-slice"
 STATUS = "partial"
-PARTIAL = ["notes", "link_previews", "message_edit"]
+PARTIAL = ["notes", "link_previews", "message_edit", "voice_transcription"]
 
 from .edits import EditError, apply_text_edit, check_can_edit  # noqa: E402,F401
 from .gestures import GestureConfig, RecordGestureMachine  # noqa: E402,F401

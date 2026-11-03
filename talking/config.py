@@ -100,6 +100,20 @@ class Settings:
     commercial_api_url: str = field(default_factory=lambda: _env("COMMERCIAL_API_URL", ""))
     commercial_api_token: str = field(default_factory=lambda: _env("COMMERCIAL_API_TOKEN", ""))
     commercial_webhook_secret: str = field(default_factory=lambda: _env("COMMERCIAL_WEBHOOK_SECRET", ""))
+    # Local/dev stub for premium checks. Never a substitute for the commercial service
+    # in production — empty URL without these flags fail-closed (no entitlement).
+    commercial_dev_entitlements: str = field(
+        default_factory=lambda: _env("COMMERCIAL_DEV_ENTITLEMENTS", "")
+    )
+    commercial_dev_premium: bool = field(
+        default_factory=lambda: _env_bool("COMMERCIAL_DEV_PREMIUM", False)
+    )
+    commercial_entitlement_cache_ttl: float = field(
+        default_factory=lambda: _env_float("COMMERCIAL_ENTITLEMENT_CACHE_TTL", 60.0)
+    )
+    commercial_api_timeout: float = field(
+        default_factory=lambda: _env_float("COMMERCIAL_API_TIMEOUT", 5.0)
+    )
 
     # Chat notes slice (Telegram-style voice_note / video_note). M4/M5 reuse these caps.
     chat_voice_max_bytes: int = field(default_factory=lambda: _env_int("CHAT_VOICE_MAX_BYTES", 8 * 1024 * 1024))
@@ -111,6 +125,34 @@ class Settings:
     chat_play_token_ttl: int = field(default_factory=lambda: _env_int("CHAT_PLAY_TOKEN_TTL", 600))
     chat_download_token_ttl: int = field(default_factory=lambda: _env_int("CHAT_DOWNLOAD_TOKEN_TTL", 120))
     chat_transcribe: bool = field(default_factory=lambda: _env_bool("CHAT_TRANSCRIBE", True))
+    # PR #3 auto-STT on upload. Default off: transcription is on-demand + premium-gated.
+    chat_transcribe_on_upload: bool = field(
+        default_factory=lambda: _env_bool("CHAT_TRANSCRIBE_ON_UPLOAD", False)
+    )
+    # none = 403 + locked button; lock = same, button visible; teaser = locked + hint copy.
+    # hidden = no button. Free users never run STT.
+    chat_transcribe_free_mode: str = field(
+        default_factory=lambda: _env("CHAT_TRANSCRIBE_FREE_MODE", "lock")
+    )
+    chat_transcribe_per_min: int = field(
+        default_factory=lambda: _env_int("CHAT_TRANSCRIBE_PER_MIN", 8)
+    )
+    chat_transcribe_max_ms: int = field(
+        default_factory=lambda: _env_int("CHAT_TRANSCRIBE_MAX_MS", 60_000)
+    )
+    chat_transcribe_job_ttl: int = field(
+        default_factory=lambda: _env_int("CHAT_TRANSCRIBE_JOB_TTL", 120)
+    )
+    chat_retention_seconds: int = field(
+        default_factory=lambda: _env_int("CHAT_RETENTION_SECONDS", 0)
+    )
+    # faster-whisper (default, local) | openai-compatible (off; audio would leave the server)
+    chat_stt_provider: str = field(
+        default_factory=lambda: _env("CHAT_STT_PROVIDER", "faster-whisper")
+    )
+    chat_stt_api_url: str = field(default_factory=lambda: _env("CHAT_STT_API_URL", ""))
+    chat_stt_api_key: str = field(default_factory=lambda: _env("CHAT_STT_API_KEY", ""))
+    chat_stt_api_model: str = field(default_factory=lambda: _env("CHAT_STT_API_MODEL", "whisper-1"))
 
     # Link previews. UNFURL_STUB=1 skips outbound HTTP (tests / demo).
     unfurl_stub: bool = field(default_factory=lambda: _env_bool("UNFURL_STUB", False))

@@ -1,9 +1,9 @@
 """Dialog + message records for the notes slice.
 
-One message model for notes, link previews, and edits. Canonical discriminator
-is ``kind``; ``type`` is kept as an alias so PR #3 clients/tests keep working.
-Canonical conversation key is ``dialog_id``; ``conversation_id`` is the alias
-used by ``/api/chat/messages``. See the merge commit that unified PRs #3/#5/#6.
+One message model for notes, link previews, edits, and transcription.
+Canonical discriminator is ``kind``; ``type`` is an alias. Canonical
+conversation key is ``dialog_id``; ``conversation_id`` is the alias used by
+``/api/chat/messages``.
 """
 from __future__ import annotations
 
@@ -48,6 +48,10 @@ class Message:
     translation_provider: str | None = None
     transcript_status: str | None = None
     transcript_reason: str | None = None
+    transcript_provider: str | None = None
+    transcript_model: str | None = None
+    transcript_created_at: float | None = None
+    transcript_duration: float | None = None
     urls: list[str] = field(default_factory=list)
     preview: dict | None = None
     edited_at: float | None = None
@@ -95,6 +99,10 @@ class Message:
             "translation_provider": self.translation_provider,
             "transcript_status": self.transcript_status,
             "transcript_reason": self.transcript_reason,
+            "transcript_provider": self.transcript_provider,
+            "transcript_model": self.transcript_model,
+            "transcript_created_at": self.transcript_created_at,
+            "transcript_duration": self.transcript_duration,
             "urls": list(self.urls or []),
             "preview": self.preview,
         }
@@ -115,6 +123,10 @@ class Message:
         d["revisions"] = list(self.revisions or [])
         return d
 
+    def to_admin(self) -> dict[str, Any]:
+        """Admin views must never see note transcripts (owner spec / M11)."""
+        return redact_for_admin(self.to_public())
+
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> "Message":
         data = dict(d)
@@ -127,3 +139,38 @@ class Message:
         extra = {k: v for k, v in data.items() if k not in known and k not in _ALIAS_KEYS}
         kw.setdefault("extra", extra)
         return cls(**kw)
+
+
+ADMIN_REDACT_FIELDS = (
+    "transcript", "translation", "src_lang", "tgt_lang", "translation_provider",
+    "transcript_status", "transcript_reason", "transcript_provider",
+    "transcript_model", "transcript_created_at", "transcript_duration",
+)
+
+
+def redact_for_admin(public: dict[str, Any]) -> dict[str, Any]:
+    """Strip speech-to-text fields so an admin panel cannot read note text."""
+    out = {k: v for k, v in public.items() if k not in ADMIN_REDACT_FIELDS}
+    out["transcript_redacted"] = True
+    return out
+
+
+def transcript_view(msg: Message) -> dict[str, Any]:
+    status = msg.transcript_status
+    if status in ("ok",):
+        status = "done"
+    elif status in ("error", "skipped"):
+        status = "failed"
+    return {
+        "message_id": msg.id,
+        "status": status,
+        "transcript": msg.transcript,
+        "translation": msg.translation,
+        "language": msg.src_lang,
+        "target_lang": msg.tgt_lang,
+        "provider": msg.transcript_provider,
+        "model": msg.transcript_model,
+        "created_at": msg.transcript_created_at,
+        "duration": msg.transcript_duration,
+        "reason": msg.transcript_reason,
+    }
