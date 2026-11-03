@@ -1,0 +1,64 @@
+openapi: 3.0.3
+info:
+  title: Talking commercial API (proprietary service)
+  version: 0.1.0
+  description: |
+    Implemented ONLY in the separate All-rights-reserved repository.
+    The GPL core calls these paths over HTTP when COMMERCIAL_API_URL is set.
+    This file is the interface contract, not an implementation.
+  contact:
+    name: hateaboutyouone
+    email: hateaboutyou111@icloud.com
+servers:
+  - url: https://commercial.example.invalid/v1
+paths:
+  /license/status:
+    get:
+      summary: Trial / paid / revoked for the calling user
+      security: [{bearerAuth: []}]
+      responses:
+        "200":
+          description: Licence view
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  tier: {type: string, enum: [free, trial, paid, revoked]}
+                  trial_seconds_remaining: {type: number}
+  /license/verify:
+    post:
+      summary: Verify a signed licence blob
+      security: [{bearerAuth: []}]
+      responses: {"200": {description: ok}}
+  /analytics/event:
+    post:
+      summary: Record an analytics event (hashed user id only)
+      security: [{bearerAuth: []}]
+      responses: {"202": {description: accepted}}
+  /talk-coins/balance:
+    get:
+      summary: Purchased vs earned Talk-coin balances
+      security: [{bearerAuth: []}]
+      responses: {"200": {description: balances}}
+  /payments/checkout:
+    post:
+      summary: Start a checkout (Stripe mock / Apple / PayPal / Blink — proprietary)
+      security: [{bearerAuth: []}]
+      responses: {"200": {description: checkout session}}
+  /admin/health:
+    get:
+      summary: Admin module liveness (authz enforced by proprietary service)
+      security: [{bearerAuth: []}]
+      responses: {"200": {description: ok}}
+  /p2p/transfer:
+    post:
+      summary: Internal P2P by nick, counterparty confirmation
+      security: [{bearerAuth: []}]
+      responses: {"200": {description: pending confirmation}}
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: token

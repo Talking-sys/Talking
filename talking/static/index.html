@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="theme-color" content="#0b1220">
+  <title>{{APP_NAME}}</title>
+  <link rel="icon" href="/static/logo.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+  <header class="top">
+    <img class="logo" src="/static/logo.svg" alt="">
+    <div class="brand">
+      <strong>{{APP_NAME}}</strong>
+      <small id="net">подключение…</small>
+    </div>
+    <span id="detected" class="pill">язык: авто</span>
+  </header>
+
+  <main>
+    <section class="card controls">
+      <label class="field">
+        <span>Перевод на</span>
+        <select id="target" aria-label="Язык перевода"></select>
+      </label>
+      <label class="field">
+        <span>Модель Whisper</span>
+        <select id="model" aria-label="Модель распознавания">
+          <option value="large-v3">large-v3 (точно)</option>
+          <option value="medium">medium</option>
+          <option value="small">small</option>
+          <option value="base">base (быстрее / телефон)</option>
+        </select>
+      </label>
+      <label class="field range">
+        <span>Пауза перед переводом <b id="pauseVal">800</b> мс</span>
+        <input id="pause" type="range" min="300" max="3000" step="100" value="800">
+      </label>
+      <label class="check">
+        <input id="clientVad" type="checkbox" checked>
+        <span>VAD на устройстве (Silero / Web Audio)</span>
+      </label>
+      <p class="hint">Команда: «переведи на немецкий». Двусторонний режим включается сам, если собеседник говорит на языке перевода.</p>
+    </section>
+
+    <button id="mic" class="mic" type="button" aria-pressed="false">
+      <span class="mic-ring"></span>
+      <span class="mic-label">Микрофон</span>
+    </button>
+
+    <section class="feed-wrap">
+      <h2>Лента <small>последние 3 минуты</small></h2>
+      <div id="feed" class="feed" aria-live="polite"></div>
+      <p id="empty" class="empty">Нажмите микрофон и говорите. Распознанный текст и перевод появятся здесь.</p>
+    </section>
+  </main>
+
+  <div id="toast" class="toast" hidden></div>
+  <footer>
+    <a href="/privacy">Privacy</a> · <a href="/terms">Terms</a> · v{{VERSION}} · {{CONTACT}}
+  </footer>
+  <script src="/static/vad.js"></script>
+  <script src="/static/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,16 @@
+.git
+.venv
+data
+__pycache__
+.pytest_cache
+*.pyc
+.env
+certs
+*.key
+*.pem
+whisper-models
+.cache
+htmlcov
+.mypy_cache
+docs/screenshots
+*.onnx

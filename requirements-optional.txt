@@ -1,0 +1,13 @@
+# DISABLED BY DEFAULT. Copyleft TTS — do not install unless you accept the licences
+# and understand they are NOT part of the default Talking distribution.
+#
+# edge-tts  — LGPL-3.0 (online Microsoft neural voices)
+# piper-tts — GPL-3.0 (offline; pulls espeak-ng, GPL-3.0)
+# pyttsx3   — MPL-2.0; on Linux typically uses system espeak-ng (GPL-3.0)
+#
+# Default product TTS is the browser Web Speech API. Server option is gTTS (MIT)
+# from requirements.txt, enabled only when APP_TTS_PROVIDERS=gtts.
+
+edge-tts>=6.1.12
+piper-tts>=1.2
+pyttsx3>=2.90
