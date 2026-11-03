@@ -39,6 +39,7 @@ Unverified or risky third-party names are marked **⚠**. Do not invent APIs for
 | **M14** | Kivy native client | Second-stage mobile app; BLE phone exchange | Web remains the v1 client |
 | **M15** | Profile, onboarding, UI chrome | Telegram-like settings (bg, 12–24 px font, accent), chat wallpapers, logo variants, onboarding buttons, bonuses-for-hours, newbie AI agent, gift grid | Gifts/Talk-coins economy is commercial (M11); GPL core only renders what the API returns |
 | **M16** | Legal pages for counsel | Expand privacy/terms templates; data-deletion request path | Templates exist in Stage 1; not legal advice |
+| **M17** | Game embed SDK (this module) | `/api/sdk/v1`, MIT Python/JS clients, engine sketches, EN+RU docs | Dual MIT/GPL pending owner confirmation. Do not mix with in-app games (M8) or chat (M4). Follow-ups in `docs/sdk/PLAN.md` |
 
 ## Hosting outline (expand in M12)
 

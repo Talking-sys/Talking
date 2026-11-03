@@ -1,0 +1,118 @@
+openapi: 3.0.3
+info:
+  title: Talking game-embed SDK API
+  version: v1
+  description: |
+    Implemented in the GPL open core (`talking/sdk_api.py`). Game clients
+    (intended MIT, see sdk/NOTICE.md) call these paths with an API key.
+    Speech/text is translated via the existing STT / MT / TTS pipeline and
+    is not written to the phone user's live buffer.
+  contact:
+    name: hateaboutyouone
+    email: hateaboutyou111@icloud.com
+servers:
+  - url: https://talk.example.invalid
+paths:
+  /api/sdk/v1:
+    get:
+      summary: Feature flags, caps, version
+      security: [{bearerAuth: []}]
+      responses:
+        "200": {description: SDK info}
+        "401": {description: unauthorized}
+        "503": {description: SDK_API_KEYS empty}
+  /api/sdk/v1/languages:
+    get:
+      summary: Whisper language list (same codes as GET /api/languages)
+      security: [{bearerAuth: []}]
+      responses:
+        "200":
+          description: wrapped list
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  languages:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        code: {type: string}
+                        en: {type: string}
+                        ru: {type: string}
+                        label: {type: string}
+                  count: {type: integer}
+                  source_auto: {type: boolean}
+  /api/sdk/v1/translate/text:
+    post:
+      summary: Translate a string
+      security: [{bearerAuth: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [text, target]
+              properties:
+                text: {type: string, maxLength: 4000}
+                source: {type: string, default: auto}
+                target: {type: string}
+                return_audio: {type: boolean, default: false}
+      responses:
+        "200": {description: Translation}
+        "400": {description: invalid / unsupported language}
+        "413": {description: text too long}
+        "429": {description: per-key rate limit}
+        "503": {description: translator unavailable}
+  /api/sdk/v1/translate/text/stream:
+    post:
+      summary: Same as translate/text but SSE (status, translation, done)
+      security: [{bearerAuth: []}]
+      responses:
+        "200":
+          description: text/event-stream
+  /api/sdk/v1/translate/audio:
+    post:
+      summary: STT then translate; optional TTS
+      security: [{bearerAuth: []}]
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [audio, target]
+              properties:
+                audio: {type: string, format: binary}
+                format: {type: string, enum: [wav, pcm_s16le, pcm_f32le]}
+                source: {type: string, default: auto}
+                target: {type: string}
+                return_audio: {type: boolean}
+                sample_rate: {type: integer, default: 16000}
+          application/json:
+            schema:
+              type: object
+              required: [audio_base64, target]
+              properties:
+                audio_base64: {type: string}
+                format: {type: string}
+                source: {type: string}
+                target: {type: string}
+                return_audio: {type: boolean}
+                sample_rate: {type: integer}
+      responses:
+        "200": {description: transcription + translation}
+        "415": {description: unsupported format}
+        "422": {description: no_speech}
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: API key
+    apiKeyHeader:
+      type: apiKey
+      in: header
+      name: X-Talking-Api-Key

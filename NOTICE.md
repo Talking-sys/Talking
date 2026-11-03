@@ -28,6 +28,12 @@ Owner’s current understanding (must be re-checked before sale or investment):
 
 **This is not legal advice. Show a lawyer the current licence texts before you sell, fund, or combine the proprietary repo with this core.**
 
+## Game embed SDK — dual licensing PENDING confirmation
+
+Client libraries under `sdk/` (Python, JavaScript, engine binding sketches, examples) are **intended** to be licensed under the **MIT Licence** (`sdk/LICENSE`) so closed-source games can embed the HTTP client without inheriting GPL from it. The Talking **server** (`talking/`, FastAPI, STT/MT/TTS) remains **GNU GPL v3**.
+
+**This split is PENDING confirmation by the copyright holder (hateaboutyouone).** Until then, treat `sdk/LICENSE` as intent, not a finished legal product. Do not copy GPL server modules into `sdk/`. Details: `sdk/NOTICE.md`. Not legal advice.
+
 ## English summary
 
-This repository is GPL v3 open core (translation, chat, games, buffer). Proprietary monetization modules belong in a separate All-rights-reserved repo owned by hateaboutyouone and must talk to core only over HTTP/WS. Caveats above are not legal advice; verify against current law and licence texts.
+This repository is GPL v3 open core (translation, chat, games, buffer). Proprietary monetization modules belong in a separate All-rights-reserved repo owned by hateaboutyouone and must talk to core only over HTTP/WS. Client libraries under `sdk/` are intended MIT, pending owner confirmation. Caveats above are not legal advice; verify against current law and licence texts.

@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "talking-sdk"
+version = "0.1.0"
+description = "Talking instant-translation SDK for games (text and speech)"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.9"
+authors = [{ name = "hateaboutyouone", email = "hateaboutyou111@icloud.com" }]
+keywords = ["translation", "game", "sdk", "talking", "localization"]
+dependencies = ["httpx>=0.27"]
+classifiers = [
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Typing :: Typed",
+]
+
+[project.urls]
+Homepage = "https://github.com/Talking-sys/Talking"
+Documentation = "https://github.com/Talking-sys/Talking/tree/main/docs/sdk"
+
+[tool.setuptools.packages.find]
+where = ["src"]

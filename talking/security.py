@@ -92,6 +92,12 @@ class TokenBucket:
         self._tokens[key] = tokens
         return False
 
+    def remaining(self, key: str) -> float:
+        now = time.time()
+        last = self._ts[key] if key in self._ts else now
+        tokens = self._tokens[key] if key in self._tokens else float(self.burst)
+        return min(self.burst, tokens + max(0.0, now - last) * self.rate)
+
 
 def client_ip(request) -> str:
     return request.client.host if request.client else "0.0.0.0"
