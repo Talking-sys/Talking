@@ -138,6 +138,32 @@ def attach_session_response(request: Request, body: dict, status: int = 200) -> 
     return resp
 
 
+def public_auth_config(settings, svc=None) -> dict:
+    """Enabled sign-in methods for the web UI. No secrets, no PII."""
+    allow = [
+        p.strip().upper()
+        for p in (settings.sms_country_allowlist or "").replace(";", ",").split(",")
+        if p.strip()
+    ]
+    phone_on = True
+    if svc is not None and getattr(svc, "phone_provider", None) is None:
+        phone_on = False
+    return {
+        "auth_mode": (settings.auth_mode or "local").strip().lower(),
+        "methods": {
+            "anonymous": True,
+            "recovery": True,
+            "phone": phone_on,
+            "google": bool(getattr(settings, "auth_google", False)),
+            "apple": bool(getattr(settings, "auth_apple", False)),
+            "email": bool(getattr(settings, "auth_email", False)),
+            "passkey": bool(getattr(settings, "auth_passkey", False)),
+        },
+        "default_region": (settings.sms_default_region or "").strip().upper(),
+        "country_allowlist": allow,
+    }
+
+
 def register_auth(app: FastAPI) -> None:
     s = app.state.settings
     store, svc, limiter, sockets, engine = build_auth_stack(s, app.state.secret)
@@ -148,6 +174,20 @@ def register_auth(app: FastAPI) -> None:
     app.state.auth_engine = engine
     install_auth_log_filter(svc.log_salt)
     app.add_middleware(AuthMiddleware)
+
+    @app.get("/signin")
+    def signin_page():
+        from talking.server import _html
+        return _html("auth.html", s)
+
+    @app.get("/account")
+    def account_page():
+        from talking.server import _html
+        return _html("account.html", s)
+
+    @app.get("/api/auth/config")
+    def auth_config():
+        return public_auth_config(s, svc)
 
     @app.post("/api/auth/anonymous")
     async def anonymous(request: Request):
@@ -251,9 +291,10 @@ def register_auth(app: FastAPI) -> None:
     @app.get("/api/auth/methods")
     async def list_methods(request: Request):
         user = require_user(request)
+        enabled = public_auth_config(s, svc)["methods"]
         if user.auth_mode == "local":
-            return {"methods": []}
-        return {"methods": await svc.public_methods(user.id)}
+            return {"methods": [], "enabled": enabled}
+        return {"methods": await svc.public_methods(user.id), "enabled": enabled}
 
     @app.delete("/api/auth/methods/{method_id}")
     async def delete_method(request: Request, method_id: str):
