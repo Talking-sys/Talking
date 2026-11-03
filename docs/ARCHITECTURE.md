@@ -20,13 +20,15 @@ Phone / browser (HTTPS)
   mic → AudioWorklet 16 kHz PCM
   client VAD (energy; Silero ONNX optional drop-in)
   Web Speech API TTS (default)
-        │  WSS /ws
+        │  WSS /ws  and  WSS /ws/translate/live (hold-to-talk partials)
         ▼
 FastAPI (Python 3.12)
   Session → STT (faster-whisper) → local voice commands
          → Translator (Grok if XAI_API_KEY, else free Google, else stub)
          → RollingBuffer 180 s + OfflineQueue JSONL
          → optional S3-compatible archive
+  LiveTranslateSession → WindowedWhisperSTT (VAD windows) → same Translator
+  POST /api/translate/record → decode_pcm16k + transcribe_and_translate
         │  HTTP only
         ▼
 Commercial service (optional, COMMERCIAL_API_URL)
@@ -54,6 +56,7 @@ Core **exposes**:
 Core **calls** (if `COMMERCIAL_API_URL` is set), never the other way around for business logic:
 
 - `GET {COMMERCIAL_API_URL}/v1/license/status`
+- `GET {COMMERCIAL_API_URL}/v1/license/entitlements` — premium flags such as `voice_transcription` (fail closed if unreachable)
 - `POST {COMMERCIAL_API_URL}/v1/analytics/event`
 - `GET {COMMERCIAL_API_URL}/v1/talk-coins/balance`
 - `POST {COMMERCIAL_API_URL}/v1/payments/checkout`
@@ -79,9 +82,11 @@ talking/                 GPL open core package
   buffer.py / offline_queue.py / archive.py
   commands.py / languages.py
   commercial/            HTTP client + stubs (no proprietary code)
-  chat/                  placeholder (M4)
+  chat/                  unified store (notes + text + edits + on-demand premium STT); M4 extends this
+  voice_translate/       press-and-hold live WS + record HTTP (reuses STT/translator)
+  unfurl/                SSRF-safe Open Graph / Twitter / oEmbed unfurl + image proxy
   games/                 placeholder (M8)
-  static/                mobile-first HTML/JS
+  static/                mobile-first HTML/JS (+ chat.html, link-preview.js / mini-browser)
 sdk/                     intended MIT client (PENDING owner confirmation)
   python/  js/  bindings/  examples/  LICENSE  NOTICE.md
 docs/sdk/                game SDK guide (EN + RU), plan, OpenAPI
@@ -95,5 +100,6 @@ docs/specs/              owner spec, human contribution evidence
 | 3-minute live buffer | SQLite + WAV on disk | same |
 | Offline queue | JSONL ring, delete after ACK | same |
 | History > 3 min | local JSONL; S3 if `S3_*` set | Cloudflare R2 |
-| Accounts / chat | — | Postgres (Neon / Aurora) |
+| Accounts / chat | file-backed dialogs + notes (`data/chat/`) | Postgres (Neon / Aurora) in M4 |
 | Rate limits / pubsub | in-process | Redis |
+| Link-preview cache | in-process; Redis if `REDIS_URL` | same |

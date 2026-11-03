@@ -22,20 +22,24 @@ def make_client(tmp_path, monkeypatch):
     from talking.stt import FakeSTTEngine
     from talking.translate import StubProvider, Translator
 
-    def _make(stt=None, translator=None, env=None, tts=None):
+    n = {"i": 0}
+
+    def _make(stt=None, translator=None, env=None, unfurl=None, messages=None, tts=None):
+        n["i"] += 1
         for k, v in (env or {}).items():
             monkeypatch.setenv(k, v)
-        monkeypatch.setenv("APP_DATA_DIR", str(tmp_path / "data"))
+        monkeypatch.setenv("APP_DATA_DIR", str(tmp_path / f"data{n['i']}"))
         monkeypatch.setenv("APP_TRANSLATE_PROVIDERS", "stub")
         s = Settings()
         tr = translator or Translator(s, providers=[StubProvider()])
         fake = stt or FakeSTTEngine(s, default_text="hello", default_lang="en")
         eng = Engine(s, translator=tr, stt=fake, tts=tts, start_background=False)
-        app = create_app(s, eng)
+        app = create_app(s, eng, unfurl=unfurl, messages=messages)
         c = TestClient(app)
         c.eng = eng
         c.app_ = app
         c.stt = fake
+        c.unfurl = app.state.unfurl
         return c
 
     return _make

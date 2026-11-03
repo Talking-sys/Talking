@@ -80,13 +80,16 @@ class TokenBucket:
 
     def allow(self, key: str) -> bool:
         now = time.time()
-        last = self._ts[key] if key in self._ts else now
-        # max(0, dt): defaultdict(time.time) can be slightly *after* `now` on first access.
-        self._tokens[key] = min(self.burst, self._tokens[key] + max(0.0, now - last) * self.rate)
+        # Use .get(..., now) so the first hit is not charged a negative dt
+        # (defaultdict(time.time) was evaluated *after* `now`, which made
+        # burst=1 fail the opening request).
+        last = self._ts.get(key, now)
+        tokens = min(self.burst, self._tokens.get(key, float(self.burst)) + max(0.0, now - last) * self.rate)
         self._ts[key] = now
-        if self._tokens[key] >= 1:
-            self._tokens[key] -= 1
+        if tokens >= 1:
+            self._tokens[key] = tokens - 1
             return True
+        self._tokens[key] = tokens
         return False
 
     def remaining(self, key: str) -> float:
@@ -107,14 +110,27 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
 
     async def dispatch(self, request: Request, call_next):
         response: Response = await call_next(request)
+        # frame-src allows the sandboxed mini-browser (http/https only; JS/data
+        # schemes are rejected in talking/static/link-preview.js before load).
+        # The app chrome must not be nested (frame-ancestors none). Fixture
+        # pages used as mini-browser targets allow same-origin framing only.
+        embeddable = request.url.path.startswith("/static/fixtures/")
+        # Sandboxed iframes get a unique origin, so frame-ancestors 'self' on the
+        # fixture would block our own mini-browser. Omit it here; XFO SAMEORIGIN
+        # still stops other sites from framing the file.
+        ancestors = "" if embeddable else " frame-ancestors 'none';"
         csp = "default-src 'self'; img-src 'self' data:; media-src 'self' blob:; " \
               "style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self' ws: wss:; " \
-              "frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
+              f"frame-src 'self' https: http:;{ancestors} " \
+              "base-uri 'self'; form-action 'self'"
         response.headers.setdefault("Content-Security-Policy", csp)
         response.headers.setdefault("X-Content-Type-Options", "nosniff")
         response.headers.setdefault("Referrer-Policy", "no-referrer")
-        response.headers.setdefault("X-Frame-Options", "DENY")
-        response.headers.setdefault("Permissions-Policy", "microphone=(self), camera=(), geolocation=()")
+        if embeddable:
+            response.headers.setdefault("X-Frame-Options", "SAMEORIGIN")
+        else:
+            response.headers.setdefault("X-Frame-Options", "DENY")
+        response.headers.setdefault("Permissions-Policy", "microphone=(self), camera=(self), geolocation=()")
         if self.production:
             response.headers.setdefault("Strict-Transport-Security", "max-age=15552000")
         return response

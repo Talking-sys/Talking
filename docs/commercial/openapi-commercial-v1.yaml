@@ -26,6 +26,33 @@ paths:
                 properties:
                   tier: {type: string, enum: [free, trial, paid, revoked]}
                   trial_seconds_remaining: {type: number}
+  /license/entitlements:
+    get:
+      summary: Entitlements for the calling user (premium flags)
+      description: |
+        GPL core calls this to gate features such as voice_transcription.
+        Unreachable / 5xx must be treated as not entitled (fail closed).
+        `tier: paid|trial|premium` may imply voice_transcription when the
+        list is omitted.
+      security: [{bearerAuth: []}]
+      parameters:
+        - in: query
+          name: user_id
+          schema: {type: string}
+      responses:
+        "200":
+          description: Entitlement view
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: {type: boolean}
+                  tier: {type: string, enum: [free, trial, paid, premium, revoked]}
+                  entitlements:
+                    type: array
+                    items: {type: string}
+                    example: [voice_transcription]
   /license/verify:
     post:
       summary: Verify a signed licence blob
