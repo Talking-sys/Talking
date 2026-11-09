@@ -24,10 +24,9 @@ import uuid
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 
-from talking.auth import authenticate_websocket
-from talking.auth.deps import require_user
 from talking.commercial.client import ENTITLEMENT_VOICE_TRANSCRIPTION
 from talking.ids import check_id
+from talking.identity import handshake_websocket, request_user_id
 from talking.languages import WHISPER_LANGUAGES
 from talking.security import TokenBucket, client_ip
 
@@ -56,7 +55,7 @@ def _http(err: MediaError | ValueError | KeyError) -> HTTPException:
 
 
 def _user_id(request: Request) -> str:
-    return require_user(request).id
+    return request_user_id(request)
 
 
 def _public_message(app: FastAPI, user_id: str, msg: Message) -> dict:
@@ -477,22 +476,13 @@ def register_chat(app: FastAPI) -> None:
 
     @app.websocket("/ws/chat")
     async def ws_chat(ws: WebSocket, t: str = ""):
-        ctx = await authenticate_websocket(ws, t)
-        if ctx is None or not ctx.authenticated:
-            await ws.close(code=1008, reason="handshake")
-            return
-        uid = ctx.id
-        try:
-            uid = check_id(uid)
-        except ValueError:
-            await ws.close(code=1008, reason="handshake")
+        uid = await handshake_websocket(ws, t)
+        if uid is None:
             return
         await ws.accept()
-        app.state.auth_sockets.add(ws, uid, ctx.session_id)
         q: asyncio.Queue = asyncio.Queue(maxsize=200)
         hub: ChatHub = app.state.chat_hub
         hub.subscribe(uid, q)
-        hub.subscribe("*", q)
 
         async def sender():
             while True:
@@ -520,5 +510,4 @@ def register_chat(app: FastAPI) -> None:
         finally:
             app.state.auth_sockets.discard(ws)
             hub.unsubscribe(uid, q)
-            hub.unsubscribe("*", q)
             send_task.cancel()

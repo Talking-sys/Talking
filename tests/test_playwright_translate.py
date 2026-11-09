@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-ARTIFACTS = Path(os.environ.get("TALKING_ARTIFACTS", "/opt/cursor/artifacts"))
+ARTIFACTS = Path(os.environ.get("TALKING_ARTIFACTS") or (Path(__file__).resolve().parent / "output"))
 
 
 def _free_port() -> int:
