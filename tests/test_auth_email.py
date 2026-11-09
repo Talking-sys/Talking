@@ -11,7 +11,7 @@ import pytest
 from talking.auth.crypto import decrypt_pii, utcnow
 from talking.auth.email_util import DEFAULT_EMAIL_CHANNEL, EmailError, normalize_email_channel, parse_email
 
-from tests.test_auth import ACCOUNTS, _anon, _h
+from tests.test_auth import ACCOUNTS, _h, _session
 
 
 def _client(make_client, **extra):
@@ -206,9 +206,9 @@ def test_production_email_start_refuses_console_sink(make_client):
 
 def test_email_link_to_existing_account(make_client):
     c = _client(make_client)
-    anon = _anon(c)
-    csrf = anon.json()["csrf_token"]
-    uid = anon.json()["user"]["id"]
+    first = _session(c)
+    csrf = first.json()["csrf_token"]
+    uid = first.json()["user"]["id"]
     email = "link-me@example.com"
     start = _start(c, email, channel="code", csrf=csrf)
     assert start.status_code == 200, start.text
@@ -221,7 +221,7 @@ def test_email_link_to_existing_account(make_client):
     me = c.get("/api/auth/me")
     assert me.json()["id"] == uid
     providers = {m["provider"] for m in me.json()["methods"]}
-    assert providers == {"anonymous", "email"}
+    assert providers == {"phone", "email"}
 
 
 def test_email_no_auto_merge(make_client):
@@ -238,7 +238,7 @@ def test_email_no_auto_merge(make_client):
     csrf = v.json()["csrf_token"]
     c.post("/api/auth/logout-all", headers=_h(csrf))
 
-    other = _anon(c)
+    other = _session(c)
     other_csrf = other.json()["csrf_token"]
     other_id = other.json()["user"]["id"]
     assert other_id != owner
@@ -259,11 +259,11 @@ def test_email_no_auto_merge(make_client):
     assert me.json()["id"] == other_id
 
 
-def test_email_verify_does_not_merge_signed_in_anonymous(make_client):
+def test_email_verify_does_not_merge_signed_in_user(make_client):
     c = _client(make_client)
-    anon = _anon(c)
-    anon_id = anon.json()["user"]["id"]
-    csrf = anon.json()["csrf_token"]
+    first = _session(c)
+    first_id = first.json()["user"]["id"]
+    csrf = first.json()["csrf_token"]
     email = "fresh@example.com"
     start = _start(c, email, channel="code", csrf=csrf)
     v = c.post(
@@ -272,14 +272,14 @@ def test_email_verify_does_not_merge_signed_in_anonymous(make_client):
         headers=_h(csrf),
     )
     assert v.status_code == 200
-    assert v.json()["user"]["id"] != anon_id
+    assert v.json()["user"]["id"] != first_id
     assert v.json()["created"] is True
 
 
 def test_email_unlink_method(make_client):
     c = _client(make_client)
-    anon = _anon(c)
-    csrf = anon.json()["csrf_token"]
+    first = _session(c)
+    csrf = first.json()["csrf_token"]
     email = "unlink@example.com"
     start = _start(c, email, channel="code", csrf=csrf)
     assert c.post(
@@ -292,7 +292,7 @@ def test_email_unlink_method(make_client):
     deleted = c.delete(f"/api/auth/methods/{email_m['id']}", headers=_h(csrf))
     assert deleted.status_code == 200
     left = {m["provider"] for m in c.get("/api/auth/methods").json()["methods"]}
-    assert left == {"anonymous"}
+    assert left == {"phone"}
 
 
 def test_email_hash_only_when_no_encryption_key():

@@ -31,9 +31,24 @@ def _h(csrf=None, origin="https://testserver"):
     return h
 
 
-def _anon(c):
-    r = c.post("/api/auth/anonymous", headers=_h())
-    assert r.status_code == 201, r.text
+def _phone_e164(region="US") -> str:
+    import phonenumbers
+    from phonenumbers import PhoneNumberFormat
+    n = phonenumbers.example_number(region)
+    return phonenumbers.format_number(n, PhoneNumberFormat.E164)
+
+
+def _session(c, region="US"):
+    """Create a signed-in phone user. Unauthenticated clients are not users."""
+    phone = _phone_e164(region)
+    start = c.post("/api/auth/phone/start", json={"phone": phone}, headers=_h())
+    assert start.status_code == 200, start.text
+    r = c.post(
+        "/api/auth/phone/verify",
+        json={"phone": phone, "code": start.json()["debug_code"]},
+        headers=_h(),
+    )
+    assert r.status_code == 200, r.text
     return r
 
 
@@ -169,34 +184,19 @@ def test_twilio_incomplete_does_not_fallback_to_console(monkeypatch, tmp_path):
         build_phone_provider(Settings())
 
 
-def test_anonymous_create_and_recover(make_client):
+def test_anonymous_endpoint_gone(make_client):
     c = _client(make_client)
-    r = _anon(c)
-    body = r.json()
-    assert "recovery_code" in body
-    code = body["recovery_code"]
-    uid = body["user"]["id"]
-    assert "-" in uid  # uuid
-    csrf = body["csrf_token"]
+    r = c.post("/api/auth/anonymous", headers=_h())
+    assert r.status_code == 404
     me = c.get("/api/auth/me")
-    assert me.status_code == 200
-    assert me.json()["id"] == uid
-    assert me.json()["csrf_token"]
-    c.post("/api/auth/logout-all", headers=_h(csrf))
-    gone = c.get("/api/auth/me")
-    assert gone.status_code == 401
-    rec = c.post("/api/auth/recover", json={"code": code}, headers=_h())
-    assert rec.status_code == 200, rec.text
-    assert rec.json()["user"]["id"] == uid
-    again = c.post("/api/auth/recover", json={"code": code}, headers=_h(rec.json()["csrf_token"]))
-    assert again.status_code == 401
+    assert me.status_code == 401
 
 
 def test_refresh_token_reuse_revokes_family(make_client):
     from fastapi.testclient import TestClient
 
     c = _client(make_client)
-    r = _anon(c)
+    r = _session(c)
     csrf = r.json()["csrf_token"]
     refresh = r.cookies.get("refresh") or c.cookies.get("refresh")
     assert refresh
@@ -215,12 +215,15 @@ def test_refresh_token_reuse_revokes_family(make_client):
 
 def test_csrf_rejection(make_client):
     c = _client(make_client)
-    r = _anon(c)
+    r = _session(c)
     csrf = r.json()["csrf_token"]
     bad_origin = c.post("/api/auth/logout", headers=_h(csrf, origin="https://evil.example"))
     assert bad_origin.status_code == 403
     missing = c.post("/api/auth/logout", headers=_h(origin="https://testserver"))
     assert missing.status_code == 403
+    empty_origin = c.post("/api/auth/logout", headers=_h(csrf, origin=""))
+    assert empty_origin.status_code == 403
+    assert empty_origin.json()["detail"] == "csrf origin"
     ok = c.post("/api/auth/logout", headers=_h(csrf))
     assert ok.status_code == 200
 
@@ -235,9 +238,19 @@ def test_socket_without_cookie_closed_in_accounts_mode(make_client):
             pass
 
 
+def test_socket_without_token_closed_in_local_mode(make_client):
+    c = make_client()
+    with pytest.raises(WebSocketDisconnect):
+        with c.websocket_connect("/ws"):
+            pass
+    with pytest.raises(WebSocketDisconnect):
+        with c.websocket_connect("/ws/chat"):
+            pass
+
+
 def test_logout_all_revokes_sockets(make_client):
     c = _client(make_client)
-    r = _anon(c)
+    r = _session(c)
     csrf = r.json()["csrf_token"]
     tok = c.get("/api/ws-token").json()["token"]
     with c.websocket_connect("/ws/chat?t=" + tok) as ws:
@@ -253,7 +266,7 @@ def test_ws_token_requires_session_and_is_short_lived(make_client):
     c = _client(make_client)
     denied = c.get("/api/ws-token")
     assert denied.status_code == 401
-    r = _anon(c)
+    r = _session(c)
     tok = c.get("/api/ws-token")
     assert tok.status_code == 200
     assert tok.json()["expires_in"] == 60
@@ -265,7 +278,7 @@ def test_ws_token_requires_session_and_is_short_lived(make_client):
 
 def test_sessions_list_and_revoke(make_client):
     c = _client(make_client)
-    r = _anon(c)
+    r = _session(c)
     csrf = r.json()["csrf_token"]
     listed = c.get("/api/auth/sessions")
     assert listed.status_code == 200
@@ -287,3 +300,4 @@ def test_local_mode_still_issues_ws_token(make_client):
     assert me.status_code == 200
     assert me.json()["id"] == "local"
     assert me.json()["auth_mode"] == "local"
+    assert me.json()["anonymous"] is False
