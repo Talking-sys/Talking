@@ -1,8 +1,8 @@
-# Auth (M10 stages 0–1 + phone)
+# Auth (M10 stages 0–2 + phone)
 
 Copyright (C) 2026 hateaboutyouone. Contact: hateaboutyou111@icloud.com.
 
-This document describes **what shipped** in the first auth PR and **what is left**.
+This document describes **what shipped** in the auth PRs and **what is left**.
 Google OAuth still requests only `openid email profile` — see `docs/GOOGLE_SCOPES.md`.
 Commercial entitlements stay behind `COMMERCIAL_API_URL` and are keyed by opaque user UUIDs.
 
@@ -12,37 +12,47 @@ and `docs/ROADMAP.md` M10. The verbatim spec is unchanged; the addendum records
 the decision (including the later change that SMS via Twilio Verify is the
 production path).
 
+Email passwordless (one-time code and/or magic link) is **stage 2** of the
+original §13 plan. It reuses `identities` / `login_challenges` / `sessions`.
+
 ## Modes
 
 | `AUTH_MODE` | When | Behaviour |
 |---|---|---|
 | `local` (default in development and tests) | Home Wi-Fi translator, pytest, Playwright | Single operator id (`USER_ID` or `local`). Not an anonymous user. HTTP uses that identity; WebSockets still require a signed token. |
-| `accounts` | Hosted multi-user | Cookie sessions, CSRF, phone sign-in. Unauthenticated clients are not users. Missing WS cookies/tokens close the socket. |
+| `accounts` | Hosted multi-user | Cookie sessions, CSRF, phone + email. Unauthenticated clients are not users. Missing WS cookies/tokens close the socket. |
 
 `AUTH_MODE=local` is **refused** when `APP_ENV=production`. Production also requires
 `APP_SECRET_KEY` (≥32 chars) and `LOG_SALT`. Production `accounts` requires `DATABASE_URL`.
 Production also requires `SMS_PROVIDER=twilio` plus `TWILIO_ACCOUNT_SID`,
 `TWILIO_AUTH_TOKEN`, and `TWILIO_VERIFY_SERVICE_SID`. `SMS_PROVIDER=console` (or
 unset, which defaults to console) is **refused** in production.
+Production also requires `MAIL_PROVIDER=smtp` plus `SMTP_HOST` and `SMTP_FROM`.
+`MAIL_PROVIDER=console` (or unset, which defaults to console) is **refused** in
+production.
 
 ## Stage 0 — Postgres foundation
 
 - SQLAlchemy 2 (async, asyncpg) + Alembic.
 - Initial migration `001_auth_foundation`: `users`, `identities`, `sessions`,
   `recovery_codes`, `auth_events` (no PII, **90-day retention** comment),
-  `login_challenges` (phone OTP / future email codes).
+  `login_challenges` (phone OTP / email codes and magic links).
+- Follow-up `002_email_challenge_target`: optional `login_challenges.target_enc`
+  (AES-GCM destination for magic-link consume; hash-only if no encryption key).
 - `users.status` is `active | deleting | deleted`. Nickname unique and nullable.
   `profile_private` defaults true. User ids are UUIDs.
-- `identities` unique (`provider`, `subject`). Provider in this PR: `phone`.
-  Email columns exist for later stages. Phone subject is `HMAC(phone)`; `phone_enc` is
-  AES-GCM with `DB_ENCRYPTION_KEY` (hash-only if the key is missing).
-  There is **no anonymous provider** and no anonymous account creation.
+- `identities` unique (`provider`, `subject`). Providers in this PR: `phone`,
+  `email`. Phone subject is `HMAC(phone)`; `phone_enc` is AES-GCM with
+  `DB_ENCRYPTION_KEY` (hash-only if the key is missing). Email subject / `email_hash`
+  is `HMAC(email)`; `email_enc` is AES-GCM with the same key (omitted when missing).
+  Email identities are created only after the code or link is verified
+  (`email_verified` is true). There is **no anonymous provider** and no anonymous
+  account creation.
 - Storage interface: in-memory (`AUTH_MODE=local` and tests) and Postgres (`AUTH_MODE=accounts`
   with `DATABASE_URL`).
 - CI runs Postgres and an Alembic upgrade / downgrade / upgrade test (`TEST_DATABASE_URL`).
 
-Passkeys, email `login_tokens`, OAuth states, and WebAuthn challenges are **not**
-implemented here (stubs only via unused identity providers).
+Passkeys, OAuth states, and WebAuthn challenges are **not** implemented here.
 
 ## Stage 1 — sessions and server-side identity
 
@@ -122,11 +132,44 @@ Flow:
 
 Phones and codes are never logged. Identity `subject` is HMAC, not the number.
 
-## Left for later stages (2–7)
+## Email (stage 2)
+
+**Provider:** pluggable `MailProvider`. Generic **SMTP** (`smtplib`, stdlib) is the
+production path. `MAIL_PROVIDER=console` is a **local development / test sink only**
+— it never prints the destination, code, or magic link. Startup (and
+`POST /api/auth/email/start`) refuses console or missing `SMTP_HOST` / `SMTP_FROM`
+when `APP_ENV=production`.
+
+Codes and magic-link tokens are generated on this server (hashed in
+`login_challenges`; 10 min TTL, 5 attempts on the code, single use). Using the
+code consumes the matching link for that address, and vice versa.
+
+Flow:
+
+1. `POST /api/auth/email/start` `{email, channel?: "code"|"link"|"both"}` —
+   omitted channel defaults to **`both`**. Address is lower-cased; the domain is
+   IDNA. Rate limits: **3 sends / 15 min per address**, **10 / hour per IP**,
+   **60 s resend cooldown**. `debug_code` / `debug_token` are returned only when
+   `APP_ENV` is test/development.
+2. `POST /api/auth/email/verify` `{email, code}` — find or **create** an account
+   (never merge with a different signed-in user). Identity is written only after
+   this check.
+3. `POST /api/auth/email/consume` `{token}` or `GET /api/auth/email/consume?token=`
+   — same as verify, via the magic link. GET is a 303 to `/` with session cookies
+   (`SameSite=Lax` so a click from the mail client works). The token is not kept
+   in `localStorage`.
+4. `POST /api/auth/email/link` `{email, code}` or `{token}` — attach the address
+   to the **current** user. Requires a **fresh** session. If the address already
+   belongs to someone else → **409 `email_taken`** (no auto-merge).
+5. Unlink: `DELETE /api/auth/methods/{id}`.
+
+Emails, codes, and tokens are never logged. Identity `subject` is HMAC, not the
+address. Plus-tags are distinct addresses.
+
+## Left for later stages (3–7)
 
 | Stage | Scope |
 |---|---|
-| 2 | Email magic link / one-time code (10 min, hashed). Reuse `login_challenges`. |
 | 3 | Google OAuth (`openid email profile` only). No auto-merge on email. |
 | 4 | Passkeys / WebAuthn. |
 | 5 | Sign in with Apple, equal prominence, private relay. |
@@ -136,13 +179,16 @@ Phones and codes are never logged. Identity `subject` is HMAC, not the number.
 ## Effort (implementation, not calendar)
 
 Stages 0–1 were scoped at about **2–3 focused days**. Phone is about **+1–1.5 days**
-(provider abstraction, E.164, abuse controls, link/no-merge). Remaining stages 2–7 are
-about **9–12 days** depending on Apple/Google console setup. Whole M10 plan including
-phone: roughly **12–16 days** of implementation once secrets and provider accounts exist.
+(provider abstraction, E.164, abuse controls, link/no-merge). Email (stage 2) is
+about **+1 day** (SMTP/console providers, OTP + magic link, the same rate limits
+and no-merge rules). Remaining stages 3–7 are about **8–11 days** depending on
+Apple/Google console setup. Whole M10 plan including phone and email: roughly
+**13–17 days** of implementation once secrets and provider accounts exist.
 
 ## Env (placeholders only — never commit real values)
 
 See `.env.example`: `AUTH_MODE`, `PUBLIC_ORIGIN`, `LOG_SALT`, `DB_ENCRYPTION_KEY`,
 `DATABASE_URL`, `APP_SECRET_KEY`, `SMS_PROVIDER`, `TWILIO_ACCOUNT_SID`,
 `TWILIO_AUTH_TOKEN`, `TWILIO_VERIFY_SERVICE_SID`, `SMS_COUNTRY_ALLOWLIST`,
-`SMS_DEFAULT_REGION`.
+`SMS_DEFAULT_REGION`, `MAIL_PROVIDER`, `SMTP_HOST`, `SMTP_PORT`, `SMTP_USERNAME`,
+`SMTP_PASSWORD`, `SMTP_FROM`, `SMTP_STARTTLS`, `SMTP_SSL`.

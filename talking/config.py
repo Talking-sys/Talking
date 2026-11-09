@@ -99,7 +99,7 @@ class Settings:
     redis_url: str = field(default_factory=lambda: _env("REDIS_URL", ""))
 
     # M10 auth. `local` is the single-user home Wi-Fi translator (tests/dev default).
-    # `accounts` enables cookies, CSRF, and phone sign-in. No anonymous users.
+    # `accounts` enables cookies, CSRF, and phone/email sign-in. No anonymous users.
     auth_mode: str = field(default_factory=lambda: _env("AUTH_MODE", "local"))
     public_origin: str = field(default_factory=lambda: _env("PUBLIC_ORIGIN", ""))
     log_salt: str = field(default_factory=lambda: _env("LOG_SALT", ""))
@@ -111,6 +111,15 @@ class Settings:
     twilio_verify_service_sid: str = field(default_factory=lambda: _env("TWILIO_VERIFY_SERVICE_SID", ""))
     sms_country_allowlist: str = field(default_factory=lambda: _env("SMS_COUNTRY_ALLOWLIST", ""))
     sms_default_region: str = field(default_factory=lambda: _env("SMS_DEFAULT_REGION", ""))
+    # console = local/dev sink only (refused in production). smtp = generic SMTP.
+    mail_provider: str = field(default_factory=lambda: _env("MAIL_PROVIDER", "console"))
+    smtp_host: str = field(default_factory=lambda: _env("SMTP_HOST", ""))
+    smtp_port: int = field(default_factory=lambda: _env_int("SMTP_PORT", 587))
+    smtp_username: str = field(default_factory=lambda: _env("SMTP_USERNAME", ""))
+    smtp_password: str = field(default_factory=lambda: _env("SMTP_PASSWORD", ""))
+    smtp_from: str = field(default_factory=lambda: _env("SMTP_FROM", ""))
+    smtp_starttls: bool = field(default_factory=lambda: _env_bool("SMTP_STARTTLS", True))
+    smtp_ssl: bool = field(default_factory=lambda: _env_bool("SMTP_SSL", False))
 
     s3_endpoint: str = field(default_factory=lambda: _env("S3_ENDPOINT", ""))
     s3_bucket: str = field(default_factory=lambda: _env("S3_BUCKET", ""))
