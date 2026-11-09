@@ -5,6 +5,8 @@ import time
 
 from fastapi import FastAPI, HTTPException, Request
 
+from talking.identity import reject_sender_spoof, request_user_id
+
 from ..security import TokenBucket, client_ip
 from ..unfurl.service import UnfurlService
 from ..unfurl.ssrf import SSRFError
@@ -48,10 +50,13 @@ def register_message_routes(
 
     @app.get("/api/chat/messages")
     def list_messages(request: Request, conversation_id: str = DEFAULT_CONVERSATION, limit: int = 50):
+        uid = request_user_id(request)
+        conv = conversation_id or DEFAULT_CONVERSATION
         return {
             "ok": True,
-            "conversation_id": conversation_id or DEFAULT_CONVERSATION,
-            "messages": [m.to_dict() for m in store.list(conversation_id, limit)],
+            "conversation_id": conv,
+            "user_id": uid,
+            "messages": [m.to_dict() for m in store.list(conv, limit)],
             "edit_window_s": _window(request),
             "max_text": MAX_TEXT,
         }
@@ -60,6 +65,7 @@ def register_message_routes(
     async def post_message(request: Request):
         if not limiter.allow(client_ip(request)):
             raise HTTPException(429, "rate limit")
+        uid = request_user_id(request)
         try:
             data = await request.json()
         except Exception:
@@ -71,7 +77,8 @@ def register_message_routes(
             raise HTTPException(400, "empty")
         if len(text) > MAX_TEXT:
             raise HTTPException(400, "text too long")
-        sender = str(data.get("sender_id") or "local")[:64]
+        reject_sender_spoof(data.get("sender_id"), uid)
+        sender = uid
         conv = str(data.get("conversation_id") or DEFAULT_CONVERSATION)[:64]
         urls = extract_urls(text)
         preview = None
@@ -93,6 +100,7 @@ def register_message_routes(
     async def patch_message(message_id: str, request: Request):
         if not edit_limiter.allow(client_ip(request)):
             raise HTTPException(429, "rate limit")
+        uid = request_user_id(request)
         try:
             data = await request.json()
         except Exception:
@@ -101,7 +109,8 @@ def register_message_routes(
             raise HTTPException(400, "invalid JSON")
         if "text" not in data:
             raise HTTPException(422, "text required")
-        sender = str(data.get("sender_id") or "local")[:64]
+        reject_sender_spoof(data.get("sender_id"), uid)
+        sender = uid
         conv = data.get("conversation_id")
         conv_s = str(conv)[:64] if conv else None
         old = store.get(message_id, conv_s)
@@ -128,6 +137,6 @@ def register_message_routes(
             msg.urls = urls
             msg.preview = preview
             public = msg.to_dict()
-            hub.publish_edit(public)
+            hub.publish_edit(public, user_id=uid)
             return {"ok": True, "message": public, "changed": True}
         return {"ok": True, "message": msg.to_dict(), "changed": False}

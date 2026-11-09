@@ -362,7 +362,7 @@
       const r = await fetch("/api/chat/messages/" + encodeURIComponent(id), {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ text, sender_id: currentUser }),
+        body: JSON.stringify({ text }),
       });
       if (!r.ok) {
         toast((Edit && Edit.errorToast(r.status, lang)) || tt("error"));
@@ -399,7 +399,7 @@
       const r = await fetch("/api/chat/messages", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ text, sender_id: currentUser }),
+        body: JSON.stringify({ text }),
       });
       if (r.status === 429) { toast(tt("tooOften")); return; }
       const data = await r.json();
@@ -413,10 +413,12 @@
     }
   });
 
-  function connectChatWs() {
+  async function connectChatWs() {
     try {
+      const tok = await fetch("/api/ws-token").then((r) => r.json());
+      if (!tok || !tok.token) return;
       const proto = location.protocol === "https:" ? "wss" : "ws";
-      const ws = new WebSocket(proto + "://" + location.host + "/ws/chat");
+      const ws = new WebSocket(proto + "://" + location.host + "/ws/chat?t=" + encodeURIComponent(tok.token));
       ws.onmessage = (e) => {
         try {
           const ev = JSON.parse(e.data);

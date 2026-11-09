@@ -82,3 +82,6 @@ def test_ws_requires_valid_token(make_client):
     with pytest.raises(WebSocketDisconnect):
         with c.websocket_connect("/ws?t=not-a-token"):
             pass
+    with pytest.raises(WebSocketDisconnect):
+        with c.websocket_connect("/ws"):
+            pass
