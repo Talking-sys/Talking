@@ -76,10 +76,19 @@ def test_identical_text_is_noop(make_client):
 
 def test_not_author_403(make_client):
     c = make_client(env={"UNFURL_STUB": "1"})
-    msg = _post(c, "secret", sender_id="alice")
-    r = c.patch(f"/api/chat/messages/{msg['id']}", json={"text": "nope", "sender_id": "bob"})
+    foreign = c.app_.state.messages.add(text="secret", sender_id="alice")
+    r = c.patch(f"/api/chat/messages/{foreign.id}", json={"text": "nope"})
     assert r.status_code == 403
     assert "author" in r.json()["detail"]
+
+
+def test_sender_id_spoofing_403(make_client):
+    c = make_client(env={"UNFURL_STUB": "1"})
+    assert c.post("/api/chat/messages", json={"text": "hi", "sender_id": "alice"}).status_code == 403
+    msg = _post(c, "mine")
+    r = c.patch(f"/api/chat/messages/{msg['id']}", json={"text": "nope", "sender_id": "bob"})
+    assert r.status_code == 403
+    assert "spoof" in r.json()["detail"]
 
 
 def test_unknown_id_404(make_client):
@@ -220,7 +229,8 @@ def test_edit_token_bucket_exhausts():
 def test_ws_broadcasts_message_edited(make_client):
     c = make_client(env={"UNFURL_STUB": "1"})
     msg = _post(c, "live")
-    with c.websocket_connect("/ws/chat") as ws:
+    tok = c.get("/api/ws-token").json()["token"]
+    with c.websocket_connect("/ws/chat?t=" + tok) as ws:
         hello = ws.receive_json()
         assert hello["type"] == "chat.hello"
         r = c.patch(f"/api/chat/messages/{msg['id']}", json={"text": "live edited"})

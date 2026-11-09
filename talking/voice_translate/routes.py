@@ -19,9 +19,9 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from talking.chat.media import MediaError, parse_waveform, sniff_container, validate_duration_ms
 from talking.chat.models import Message
 from talking.chat.notes import decode_pcm16k
-from talking.ids import check_id
+from talking.identity import handshake_websocket, server_user_id
 from talking.languages import WHISPER_LANGUAGES
-from talking.security import TokenBucket, client_ip, unsign
+from talking.security import TokenBucket, client_ip
 from talking.stt import STTUnavailable
 from talking.vad import pcm16_to_float
 
@@ -32,16 +32,8 @@ from .session import LiveTranslateSession
 log = logging.getLogger(__name__)
 
 
-def _uid_from_app(app: FastAPI) -> str:
-    uid = app.state.engine.store.get("user_id") or "local"
-    try:
-        return check_id(uid)
-    except ValueError:
-        return "local"
-
-
 def _user_id(request: Request) -> str:
-    return _uid_from_app(request.app)
+    return server_user_id(request.app)
 
 
 def _public_message(app: FastAPI, user_id: str, msg: Message) -> dict:
@@ -226,26 +218,13 @@ def register_voice_translate(app: FastAPI) -> None:
     @app.websocket("/ws/translate/live")
     async def ws_live(ws: WebSocket, t: str = ""):
         eng = app.state.engine
-        origins = [o.strip() for o in s.cors_origins.split(",") if o.strip()]
         ip = client_ip(ws)
         if not live_limiter.allow(ip):
             await ws.close(code=1008, reason="rate limit")
             return
-        origin = ws.headers.get("origin")
-        host = ws.headers.get("host", "")
-        allowed = set(origins) | {f"https://{host}", f"http://{host}"}
-        if origin and origin not in allowed:
-            await ws.close(code=1008, reason="origin")
+        uid = await handshake_websocket(ws, t)
+        if uid is None:
             return
-        tok = unsign(app.state.secret, t, "ws") if t else {"u": _uid_from_app(app)}
-        if t and not tok:
-            await ws.close(code=1008, reason="handshake")
-            return
-        uid = (tok or {}).get("u") or _uid_from_app(app)
-        try:
-            uid = check_id(uid)
-        except ValueError:
-            uid = "local"
         entitlement = live_translate_allowed(eng, uid)
         if not entitlement["allowed"]:
             await ws.accept()

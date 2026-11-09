@@ -23,9 +23,10 @@ from .config import Settings, WHISPER_MODELS
 from .engine import Engine
 from .games import not_implemented as games_stub
 from .ids import secure_dir
+from .identity import handshake_websocket, server_user_id
 from .languages import languages_payload
 from .sdk_api import SdkError, sdk_error_response, sdk_router
-from .security import SecurityHeadersMiddleware, TokenBucket, client_ip, load_server_secret, sign, unsign
+from .security import SecurityHeadersMiddleware, TokenBucket, client_ip, load_server_secret, sign
 from .settings_store import PAUSE_MAX, PAUSE_MIN
 from .store import ping_postgres, ping_redis
 from .unfurl.routes import register_unfurl_routes
@@ -212,27 +213,27 @@ def create_app(settings: Settings | None = None, engine: Engine | None = None,
 
     @app.get("/api/ws-token")
     def ws_token():
-        uid = eng.store.get("user_id") or "local"
+        uid = server_user_id(app)
         return {"token": sign(secret, {"u": uid}, "ws", ttl=3600)}
 
     @app.get("/api/history")
     def history():
-        uid = eng.store.get("user_id") or "local"
+        uid = server_user_id(app)
         return [e.to_dict() for e in eng.history_for(uid).entries()]
 
     @app.get("/api/history.json")
     def history_json():
-        uid = eng.store.get("user_id") or "local"
+        uid = server_user_id(app)
         return JSONResponse(json.loads(eng.history_for(uid).export_json() or "[]"))
 
     @app.get("/api/history.txt", response_class=PlainTextResponse)
     def history_txt():
-        uid = eng.store.get("user_id") or "local"
+        uid = server_user_id(app)
         return eng.history_for(uid).export_text()
 
     @app.post("/api/history/clear")
     def history_clear():
-        uid = eng.store.get("user_id") or "local"
+        uid = server_user_id(app)
         eng.history_for(uid).clear()
         return {"ok": True}
 
@@ -253,7 +254,7 @@ def create_app(settings: Settings | None = None, engine: Engine | None = None,
     register_chat(app)
     register_voice_translate(app)
     if messages is None:
-        messages = MessageStore(chat_store=app.state.chat_store)
+        messages = MessageStore(chat_store=app.state.chat_store, user_id=server_user_id(app))
     app.state.messages = messages
 
     register_unfurl_routes(app, unfurl=unfurl, limiter=unfurl_limiter)
@@ -277,7 +278,7 @@ def create_app(settings: Settings | None = None, engine: Engine | None = None,
 
     @app.get("/api/commercial/license")
     def commercial_license():
-        uid = eng.store.get("user_id") or "local"
+        uid = server_user_id(app)
         return eng.commercial.license_status(uid)
 
     @app.get("/api/commercial/talk-coins")
@@ -314,17 +315,9 @@ def create_app(settings: Settings | None = None, engine: Engine | None = None,
         if not ws_limiter.allow(ip):
             await ws.close(code=1008, reason="rate limit")
             return
-        origin = ws.headers.get("origin")
-        host = ws.headers.get("host", "")
-        allowed = set(origins) | {f"https://{host}", f"http://{host}"}
-        if origin and origin not in allowed:
-            await ws.close(code=1008, reason="origin")
+        user_id = await handshake_websocket(ws, t)
+        if user_id is None:
             return
-        tok = unsign(secret, t, "ws") if t else {"u": eng.store.get("user_id") or "local"}
-        if t and not tok:
-            await ws.close(code=1008, reason="handshake")
-            return
-        user_id = (tok or {}).get("u") or "local"
         await ws.accept()
         loop = asyncio.get_running_loop()
         out: asyncio.Queue = asyncio.Queue(maxsize=1000)

@@ -13,7 +13,7 @@ import pytest
 
 from tests.media_bytes import make_wav_bytes, webm_header
 
-ARTIFACTS = Path(os.environ.get("TALKING_ARTIFACTS", "/opt/cursor/artifacts"))
+ARTIFACTS = Path(os.environ.get("TALKING_ARTIFACTS") or (Path(__file__).resolve().parent / "output"))
 
 
 def _free_port() -> int:
