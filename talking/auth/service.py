@@ -1,4 +1,4 @@
-"""Session, anonymous, recovery, and phone auth operations."""
+"""Session, recovery, and phone auth operations."""
 from __future__ import annotations
 
 import logging
@@ -15,7 +15,6 @@ from .crypto import (
     hash_token,
     ip_hash,
     new_id,
-    new_recovery_code,
     new_refresh_token,
     phone_subject,
     user_log_id,
@@ -26,7 +25,6 @@ from .storage import AuthStorage
 from .types import (
     ChallengeRecord,
     IdentityRecord,
-    RecoveryRecord,
     SessionRecord,
     UserRecord,
 )
@@ -164,27 +162,6 @@ class AuthService:
 
     def session_is_fresh(self, sess: SessionRecord) -> bool:
         return (utcnow() - sess.auth_at).total_seconds() <= FRESH_AUTH_S
-
-    async def create_anonymous(self, *, ip: str | None = None, user_agent: str | None = None) -> dict:
-        user = UserRecord(id=new_id())
-        await self.store.create_user(user)
-        ident = IdentityRecord(
-            id=new_id(), user_id=user.id, provider="anonymous", subject=user.id,
-        )
-        await self.store.create_identity(ident)
-        code = new_recovery_code()
-        await self.store.create_recovery(RecoveryRecord(
-            id=new_id(), user_id=user.id, code_hash=hash_token(code),
-        ))
-        sess, refresh = await self.issue_session(user.id, ip=ip, user_agent=user_agent)
-        await self._event("anonymous_create", user_id=user.id, ip=ip)
-        log.info("anonymous account user=%s", self.uid_log(user.id))
-        return {
-            "user": self.public_user(user),
-            "recovery_code": code,
-            "session": sess,
-            "refresh": refresh,
-        }
 
     async def recover(self, code: str, *, ip: str | None = None, user_agent: str | None = None) -> dict:
         rec = await self.store.get_recovery_by_hash(hash_token((code or "").strip().lower()))

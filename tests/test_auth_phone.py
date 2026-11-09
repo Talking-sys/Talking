@@ -12,7 +12,7 @@ from phonenumbers import PhoneNumberFormat
 from talking.auth.crypto import utcnow
 from talking.auth.phone_util import DEFAULT_PHONE_CHANNEL, PhoneError, normalize_phone_channel
 
-from tests.test_auth import ACCOUNTS, _anon, _h
+from tests.test_auth import ACCOUNTS, _h, _session
 
 
 def _phone(region="US") -> str:
@@ -191,10 +191,10 @@ def test_twilio_verify_sends_sms_never_email():
 
 def test_phone_link_to_existing_account(make_client):
     c = _client(make_client)
-    anon = _anon(c)
-    csrf = anon.json()["csrf_token"]
-    uid = anon.json()["user"]["id"]
-    phone = _phone()
+    first = _session(c, "US")
+    csrf = first.json()["csrf_token"]
+    uid = first.json()["user"]["id"]
+    phone = _phone("GB")
     start = _start(c, phone, csrf=csrf)
     assert start.status_code == 200, start.text
     linked = c.post(
@@ -206,7 +206,8 @@ def test_phone_link_to_existing_account(make_client):
     me = c.get("/api/auth/me")
     assert me.json()["id"] == uid
     providers = {m["provider"] for m in me.json()["methods"]}
-    assert providers == {"anonymous", "phone"}
+    assert providers == {"phone"}
+    assert len(me.json()["methods"]) == 2
 
 
 def test_phone_no_auto_merge(make_client):
@@ -223,7 +224,7 @@ def test_phone_no_auto_merge(make_client):
     csrf = v.json()["csrf_token"]
     c.post("/api/auth/logout-all", headers=_h(csrf))
 
-    other = _anon(c)
+    other = _session(c, "US")
     other_csrf = other.json()["csrf_token"]
     other_id = other.json()["user"]["id"]
     assert other_id != owner
@@ -253,9 +254,9 @@ def test_phone_country_allowlist(make_client):
 
 def test_phone_unlink_method(make_client):
     c = _client(make_client)
-    anon = _anon(c)
-    csrf = anon.json()["csrf_token"]
-    phone = _phone()
+    first = _session(c, "US")
+    csrf = first.json()["csrf_token"]
+    phone = _phone("GB")
     start = _start(c, phone, csrf=csrf)
     assert start.status_code == 200, start.text
     assert c.post(
@@ -264,8 +265,13 @@ def test_phone_unlink_method(make_client):
         headers=_h(csrf),
     ).status_code == 200
     methods = c.get("/api/auth/methods").json()["methods"]
-    phone_m = next(m for m in methods if m["provider"] == "phone")
-    deleted = c.delete(f"/api/auth/methods/{phone_m['id']}", headers=_h(csrf))
+    assert len(methods) == 2
+    extra = methods[1]
+    deleted = c.delete(f"/api/auth/methods/{extra['id']}", headers=_h(csrf))
     assert deleted.status_code == 200
-    left = {m["provider"] for m in c.get("/api/auth/methods").json()["methods"]}
-    assert left == {"anonymous"}
+    left = c.get("/api/auth/methods").json()["methods"]
+    assert len(left) == 1
+    assert left[0]["provider"] == "phone"
+    last = c.delete(f"/api/auth/methods/{left[0]['id']}", headers=_h(csrf))
+    assert last.status_code == 400
+    assert last.json()["detail"] == "last_method"

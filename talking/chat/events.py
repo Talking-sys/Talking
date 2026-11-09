@@ -10,8 +10,7 @@ import logging
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 
-from talking.auth import authenticate_websocket
-from talking.ids import check_id
+from talking.identity import handshake_websocket
 
 from .hub import ChatHub
 
@@ -43,18 +42,10 @@ def register_chat_ws(app: FastAPI) -> None:
 
     @app.websocket("/ws/chat")
     async def ws_chat(ws: WebSocket, t: str = ""):
-        ctx = await authenticate_websocket(ws, t)
-        if ctx is None or not ctx.authenticated:
-            await ws.close(code=1008, reason="handshake")
-            return
-        uid = ctx.id
-        try:
-            uid = check_id(uid)
-        except ValueError:
-            await ws.close(code=1008, reason="handshake")
+        uid = await handshake_websocket(ws, t)
+        if uid is None:
             return
         await ws.accept()
-        app.state.auth_sockets.add(ws, uid, ctx.session_id)
         q: asyncio.Queue = asyncio.Queue(maxsize=200)
         hub.subscribe(uid, q)
 
@@ -82,6 +73,8 @@ def register_chat_ws(app: FastAPI) -> None:
         except WebSocketDisconnect:
             pass
         finally:
-            app.state.auth_sockets.discard(ws)
+            sockets = getattr(app.state, "auth_sockets", None)
+            if sockets is not None:
+                sockets.discard(ws)
             hub.unsubscribe(uid, q)
             send_task.cancel()

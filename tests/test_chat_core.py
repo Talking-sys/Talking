@@ -5,6 +5,7 @@ from fastapi.testclient import TestClient
 
 from talking.chat.nicks import NickError, validate_nick
 from talking.chat.translation_cache import MessageTranslationCache
+from tests.test_auth import _h, _session
 
 ACCOUNTS = {
     "AUTH_MODE": "accounts",
@@ -18,24 +19,13 @@ ACCOUNTS = {
 }
 
 
-def _h(csrf=None, origin="https://testserver"):
-    h = {}
-    if origin:
-        h["Origin"] = origin
-    if csrf:
-        h["X-CSRF-Token"] = csrf
-    return h
-
-
 def _pair(make_client, **extra):
     env = dict(ACCOUNTS)
     env.update(extra)
     a = make_client(env=env, base_url="https://testserver")
-    ra = a.post("/api/auth/anonymous", headers=_h())
-    assert ra.status_code == 201, ra.text
+    ra = _session(a, "US")
     b = TestClient(a.app_, base_url="https://testserver")
-    rb = b.post("/api/auth/anonymous", headers=_h())
-    assert rb.status_code == 201, rb.text
+    rb = _session(b, "GB")
     return a, ra.json(), b, rb.json()
 
 
@@ -372,7 +362,7 @@ def test_per_dialog_lang_override_uses_cache(make_client):
 def test_non_participant_cannot_read_dm(make_client):
     a, aa, b, bb = _pair(make_client)
     c = TestClient(a.app_, base_url="https://testserver")
-    rc = c.post("/api/auth/anonymous", headers=_h())
+    rc = _session(c, "FR")
     _set_nick(a, aa, "Alice")
     _set_nick(b, bb, "Boris")
     did = a.post("/api/chat/dialogs", json={"nickname": "Boris"}, headers=_h(aa["csrf_token"])).json()["id"]
