@@ -34,7 +34,7 @@
       codeSentCall: "Мы звоним на {phone}. Введите код из звонка.",
       otherTitle: "Другие способы",
       or: "или",
-      anonymous: "Продолжить анонимно",
+      anonymous: "Вход по телефону",
       recoverySummary: "Есть код восстановления",
       recoveryLabel: "Код восстановления",
       recover: "Войти по коду",
@@ -43,7 +43,7 @@
       email: "Почта",
       passkey: "Passkey",
       savedTitle: "Сохраните код восстановления",
-      savedHint: "Он показывается один раз. Без него анонимный аккаунт не вернуть.",
+      savedHint: "Он показывается один раз.",
       copy: "Скопировать",
       copied: "Скопировано",
       savedLabel: "Я сохранил код в надёжном месте",
@@ -121,7 +121,7 @@
       codeSentCall: "Calling {phone}. Enter the code from the call.",
       otherTitle: "Other ways",
       or: "or",
-      anonymous: "Continue anonymously",
+      anonymous: "Sign in with phone",
       recoverySummary: "I have a recovery code",
       recoveryLabel: "Recovery code",
       recover: "Sign in with code",
@@ -130,7 +130,7 @@
       email: "Email",
       passkey: "Passkey",
       savedTitle: "Save your recovery code",
-      savedHint: "It is shown once. Without it this anonymous account cannot be recovered.",
+      savedHint: "It is shown once.",
       copy: "Copy",
       copied: "Copied",
       savedLabel: "I saved this code somewhere safe",
@@ -455,7 +455,6 @@
       config: () => request("GET", "/api/auth/config"),
       me: () => request("GET", "/api/auth/me"),
       refresh: () => request("POST", "/api/auth/refresh"),
-      anonymous: () => request("POST", "/api/auth/anonymous", {}),
       recover: (code) => request("POST", "/api/auth/recover", { code }),
       phoneStart: (phone, channel) => request("POST", "/api/auth/phone/start", { phone, channel: channel || "sms" }),
       phoneVerify: (phone, code) => request("POST", "/api/auth/phone/verify", { phone, code }),
@@ -537,7 +536,6 @@
       setText("btnChangeNumber", t(ui.lang, "changeNumber"));
       setText("otherTitle", t(ui.lang, "otherTitle"));
       setText("orDivider", t(ui.lang, "or"));
-      setText("btnAnonymous", t(ui.lang, "anonymous"));
       setText("recoverySummary", t(ui.lang, "recoverySummary"));
       setText("lblRecovery", t(ui.lang, "recoveryLabel"));
       setText("btnRecover", t(ui.lang, "recover"));
@@ -655,7 +653,7 @@
     function localLock() {
       const local = !accountsMode();
       show($("localBanner"), local);
-      ["phoneForm", "codeForm", "btnAnonymous", "recoveryForm", "btnAddPhone"].forEach((id) => {
+      ["phoneForm", "codeForm", "recoveryForm", "btnAddPhone"].forEach((id) => {
         const el = $(id);
         if (!el) return;
         if (el.tagName === "FORM") {
@@ -871,35 +869,12 @@
         show($("phoneForm"), true);
         banner();
       });
-      $("btnAnonymous").addEventListener("click", async () => {
-        banner();
-        const res = await client.anonymous();
-        if (!res.ok) { fail(res); return; }
-        showRecoveryOnce(res.data.recovery_code || "");
-      });
       $("recoveryForm").addEventListener("submit", async (ev) => {
         ev.preventDefault();
         banner();
         const code = normalizeRecovery($("recoveryInput").value);
         const res = await client.recover(code);
         if (!res.ok) { fail(res); return; }
-        window.location.href = "/account";
-      });
-      $("btnCopyRecovery").addEventListener("click", async () => {
-        const text = ($("recoveryCode") && $("recoveryCode").textContent) || "";
-        try {
-          if (navigator.clipboard && navigator.clipboard.writeText) {
-            await navigator.clipboard.writeText(text);
-          }
-          banner("ok", t(ui.lang, "copied"));
-        } catch (e) {
-          banner("ok", t(ui.lang, "copied"));
-        }
-      });
-      $("savedCheck").addEventListener("change", () => {
-        $("btnSavedContinue").disabled = !$("savedCheck").checked;
-      });
-      $("btnSavedContinue").addEventListener("click", () => {
         window.location.href = "/account";
       });
       bindOAuthClicks();

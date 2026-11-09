@@ -54,13 +54,14 @@ class ChatHub:
         except RuntimeError:
             _fanout()
 
-    def publish_edit(self, msg_public: dict) -> None:
+    def publish_edit(self, msg_public: dict, user_id: str | None = None) -> None:
         event = {"type": "message_edited", "message": msg_public}
         keys = {
-            "*",
+            str(user_id or ""),
             str(msg_public.get("sender_id") or ""),
             str(msg_public.get("conversation_id") or msg_public.get("dialog_id") or ""),
         }
+        keys.discard("*")
         for key in keys:
             if key:
                 self.publish(key, event)

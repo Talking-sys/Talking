@@ -16,12 +16,10 @@ import uuid
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, JSONResponse
 
-from talking.auth import authenticate_websocket
-from talking.auth.deps import require_user
 from talking.chat.media import MediaError, parse_waveform, sniff_container, validate_duration_ms
 from talking.chat.models import Message
 from talking.chat.notes import decode_pcm16k
-from talking.ids import check_id
+from talking.identity import handshake_websocket, request_user_id
 from talking.languages import WHISPER_LANGUAGES
 from talking.security import TokenBucket, client_ip
 from talking.stt import STTUnavailable
@@ -35,7 +33,7 @@ log = logging.getLogger(__name__)
 
 
 def _user_id(request: Request) -> str:
-    return require_user(request).id
+    return request_user_id(request)
 
 
 def _public_message(app: FastAPI, user_id: str, msg: Message) -> dict:
@@ -224,15 +222,8 @@ def register_voice_translate(app: FastAPI) -> None:
         if not live_limiter.allow(ip):
             await ws.close(code=1008, reason="rate limit")
             return
-        ctx = await authenticate_websocket(ws, t)
-        if ctx is None or not ctx.authenticated:
-            await ws.close(code=1008, reason="handshake")
-            return
-        uid = ctx.id
-        try:
-            uid = check_id(uid)
-        except ValueError:
-            await ws.close(code=1008, reason="handshake")
+        uid = await handshake_websocket(ws, t)
+        if uid is None:
             return
         entitlement = live_translate_allowed(eng, uid)
         if not entitlement["allowed"]:
@@ -244,9 +235,11 @@ def register_voice_translate(app: FastAPI) -> None:
                 "premium_gated": True,
             }, ensure_ascii=False))
             await ws.close(code=1008, reason="not entitled")
+            sockets = getattr(app.state, "auth_sockets", None)
+            if sockets is not None:
+                sockets.discard(ws)
             return
         await ws.accept()
-        app.state.auth_sockets.add(ws, uid, ctx.session_id)
         loop = asyncio.get_running_loop()
         maxsize = max(8, int(s.voice_translate_max_queue))
         out: asyncio.Queue = asyncio.Queue(maxsize=maxsize)

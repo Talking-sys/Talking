@@ -13,7 +13,7 @@ import pytest
 from talking.auth.crypto import utcnow
 from tests.test_auth import ACCOUNTS
 
-ARTIFACTS = Path(os.environ.get("TALKING_ARTIFACTS", "/opt/cursor/artifacts"))
+ARTIFACTS = Path(os.environ.get("TALKING_ARTIFACTS") or (Path(__file__).resolve().parent / "output"))
 pytestmark = pytest.mark.timeout(90)
 
 
@@ -72,7 +72,7 @@ def test_playwright_phone_signin_rate_limit_and_sessions(make_client):
             page.goto(origin + "/signin", wait_until="domcontentloaded")
             page.wait_for_selector("#btnSendCode")
             assert page.locator("#codeForm").is_hidden()
-            assert page.locator("#recoveryOnce").is_hidden()
+            assert page.locator("#btnAnonymous").count() == 0
             page.screenshot(path=str(ARTIFACTS / "auth_signin_mobile.png"), full_page=True)
             assert page.locator("#oauthGoogle").get_attribute("hidden") is not None
             assert page.locator("#oauthApple").get_attribute("hidden") is not None
@@ -111,7 +111,7 @@ def test_playwright_phone_signin_rate_limit_and_sessions(make_client):
 
 
 @pytest.mark.timeout(90)
-def test_playwright_anonymous_recovery_methods_and_oauth(make_client):
+def test_playwright_phone_methods_and_oauth(make_client):
     pw = pytest.importorskip("playwright.sync_api")
     c, app, server, origin = _start(make_client)
     ARTIFACTS.mkdir(parents=True, exist_ok=True)
@@ -121,40 +121,24 @@ def test_playwright_anonymous_recovery_methods_and_oauth(make_client):
             context = browser.new_context(viewport={"width": 1100, "height": 800})
             page = context.new_page()
             page.goto(origin + "/signin", wait_until="domcontentloaded")
-            page.wait_for_selector("#btnAnonymous")
+            page.wait_for_selector("#btnSendCode")
             display = page.locator("#signinGrid").evaluate("el => getComputedStyle(el).display")
             assert display == "grid"
             page.click("#uiLangEn")
             page.wait_for_function("() => document.documentElement.lang === 'en'")
-            assert page.locator("#btnAnonymous").inner_text() == "Continue anonymously"
+            assert page.locator("#phoneTitle").inner_text() == "Sign in with phone"
             page.click("#uiLangRu")
-            page.click("#btnAnonymous")
-            page.wait_for_selector("#recoveryOnce:not([hidden])")
-            code = page.locator("#recoveryCode").inner_text().strip()
-            assert "-" in code
-            page.check("#savedCheck")
-            page.click("#btnSavedContinue")
+            _select_us(page)
+            with page.expect_response("**/api/auth/phone/start") as start_info:
+                page.click("#btnSendCode")
+            start = start_info.value
+            assert start.ok, start.text()
+            page.wait_for_selector("#codeForm:not([hidden])")
+            page.fill("#codeInput", start.json()["debug_code"])
+            page.click("#btnVerify")
             page.wait_for_url("**/account", timeout=8000)
             page.wait_for_selector("[data-testid=session-list] .list-item")
             assert page.locator("[data-testid=method-list] button[data-action=remove-method]").is_disabled()
-
-            other = browser.new_context()
-            page2 = other.new_page()
-            page2.goto(origin + "/signin", wait_until="domcontentloaded")
-            page2.click("#recoverySummary")
-            page2.fill("#recoveryInput", code)
-            page2.click("#btnRecover")
-            page2.wait_for_url("**/account", timeout=8000)
-
-            page.reload(wait_until="domcontentloaded")
-            page.wait_for_selector("[data-testid=session-list] .list-item")
-            assert page.locator("[data-testid=session-list] .list-item").count() >= 2
-            other_btn = page.locator("[data-testid=session-list] .list-item").filter(
-                has_not=page.locator(".badge")
-            ).locator("button").first
-            other_btn.click()
-            page.wait_for_timeout(300)
-            assert page.locator("[data-testid=session-list] .list-item").count() == 1
 
             page.click("#btnAddPhone")
             page.wait_for_selector("#linkPhoneForm:not([hidden])")
@@ -191,7 +175,7 @@ def test_playwright_anonymous_recovery_methods_and_oauth(make_client):
                 json={
                     "auth_mode": "accounts",
                     "methods": {
-                        "anonymous": True, "recovery": True, "phone": True,
+                        "anonymous": False, "recovery": True, "phone": True,
                         "google": True, "apple": True, "email": True, "passkey": True,
                     },
                     "default_region": "US",
@@ -208,7 +192,7 @@ def test_playwright_anonymous_recovery_methods_and_oauth(make_client):
                 json={
                     "auth_mode": "accounts",
                     "methods": {
-                        "anonymous": True, "recovery": True, "phone": True,
+                        "anonymous": False, "recovery": True, "phone": True,
                         "google": True, "apple": True, "email": True, "passkey": True,
                     },
                     "default_region": "US",
@@ -224,7 +208,6 @@ def test_playwright_anonymous_recovery_methods_and_oauth(make_client):
                 "not available" in gpage.locator("[data-testid=auth-error]").inner_text().lower()
             gpage.screenshot(path=str(ARTIFACTS / "auth_signin_oauth.png"), full_page=True)
             guest.close()
-            other.close()
             browser.close()
     finally:
         server.should_exit = True

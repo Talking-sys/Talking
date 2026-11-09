@@ -72,9 +72,6 @@
           <button type="button" id="oauthPasskey" class="btn" hidden>Passkey</button>
         </div>
         <p class="divider" id="orDivider">или</p>
-        <div class="auth-actions">
-          <button type="button" id="btnAnonymous" class="btn btn-primary">Продолжить анонимно</button>
-        </div>
         <details class="details-block" id="recoveryDetails">
           <summary id="recoverySummary">Есть код восстановления</summary>
           <form id="recoveryForm" class="stack">
@@ -87,20 +84,6 @@
         </details>
       </aside>
     </div>
-
-    <section class="card auth-card span-2" id="recoveryOnce" hidden>
-      <h1 id="savedTitle">Сохраните код восстановления</h1>
-      <p class="hint" id="savedHint">Он показывается один раз. Без него анонимный аккаунт не вернуть.</p>
-      <pre id="recoveryCode" class="recovery-code"></pre>
-      <div class="btn-row two">
-        <button type="button" id="btnCopyRecovery" class="btn">Скопировать</button>
-      </div>
-      <label class="check">
-        <input id="savedCheck" type="checkbox">
-        <span id="savedLabel">Я сохранил код в надёжном месте</span>
-      </label>
-      <button type="button" id="btnSavedContinue" class="btn btn-primary" disabled>Продолжить</button>
-    </section>
   </main>
 
   <div id="toast" class="toast" hidden></div>

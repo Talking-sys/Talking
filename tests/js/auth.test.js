@@ -4,8 +4,8 @@ const path = require("path");
 const auth = require(path.join(__dirname, "../../talking/static/auth.js"));
 
 function testI18n() {
-  assert.strictEqual(auth.t("ru", "anonymous"), "Продолжить анонимно");
-  assert.strictEqual(auth.t("en", "anonymous"), "Continue anonymously");
+  assert.strictEqual(auth.t("ru", "phoneTitle"), "Вход по телефону");
+  assert.strictEqual(auth.t("en", "phoneTitle"), "Sign in with phone");
   assert.strictEqual(auth.t("en", "resendIn", { n: 12 }), "Send again in 12s");
   assert.strictEqual(auth.t("ru", "resendIn", { n: 5 }), "Ещё раз через 5 с");
   assert.strictEqual(auth.detectLang({ documentElement: { getAttribute: () => "en" } }), "en");
@@ -65,7 +65,7 @@ function testNoTokensInStorage() {
 
 function testProviderLabel() {
   assert.strictEqual(auth.providerLabel("en", "phone"), "Phone");
-  assert.strictEqual(auth.providerLabel("ru", "anonymous"), "Анонимный вход");
+  assert.strictEqual(auth.providerLabel("ru", "phone"), "Телефон");
 }
 
 function testDeviceLabel() {

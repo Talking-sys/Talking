@@ -53,7 +53,8 @@ class SettingsStore:
         if env_uid:
             self.data["user_id"] = env_uid
         if not self.data.get("user_id"):
-            # Single-user local mode. Opaque UUIDs are minted in AUTH_MODE=accounts.
+            # Single-user local mode: the operator of this process. Do not mint
+            # anonymous/unauthenticated ids — that identity is not a user.
             self.data["user_id"] = "local"
         self.data["pause_ms"] = clamp_pause(self.data.get("pause_ms"))
         self.data["whisper_model"] = clamp_model(self.data.get("whisper_model"))
