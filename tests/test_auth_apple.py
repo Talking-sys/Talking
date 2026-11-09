@@ -23,7 +23,7 @@ from talking.auth.jwt_es256 import encode_es256, public_jwk, verify_es256
 from talking.auth.http import validate_auth_settings
 from talking.config import Settings
 
-from tests.test_auth import ACCOUNTS, _anon, _h, _production_accounts_env
+from tests.test_auth import ACCOUNTS, _h, _production_accounts_env, _session
 
 CLIENT_ID = "com.talking.test.web"
 TEAM_ID = "TEAM123456"
@@ -351,9 +351,9 @@ def test_no_auto_merge_on_email(make_client):
 def test_link_to_existing_account(make_client):
     fake = FakeApple()
     c = _client(make_client, fake)
-    anon = _anon(c)
-    csrf = anon.json()["csrf_token"]
-    uid = anon.json()["user"]["id"]
+    first = _session(c)
+    csrf = first.json()["csrf_token"]
+    uid = first.json()["user"]["id"]
     start = c.post(
         "/api/auth/apple/start",
         json={"intent": "link"},
@@ -370,14 +370,14 @@ def test_link_to_existing_account(make_client):
     assert linked.json()["linked"] is True
     me = c.get("/api/auth/me")
     assert me.json()["id"] == uid
-    assert {m["provider"] for m in me.json()["methods"]} == {"anonymous", "apple"}
+    assert {m["provider"] for m in me.json()["methods"]} == {"phone", "apple"}
 
 
 def test_link_requires_post(make_client):
     fake = FakeApple()
     c = _client(make_client, fake)
-    anon = _anon(c)
-    r = c.get("/api/auth/apple/start?intent=link", headers={**JSON_H, "X-CSRF-Token": anon.json()["csrf_token"]})
+    first = _session(c)
+    r = c.get("/api/auth/apple/start?intent=link", headers={**JSON_H, "X-CSRF-Token": first.json()["csrf_token"]})
     assert r.status_code == 405
 
 
@@ -394,7 +394,7 @@ def test_no_auto_merge_on_link(make_client):
     owner = first.json()["user"]["id"]
     c.post("/api/auth/logout-all", headers=_h(first.json()["csrf_token"]))
 
-    other = _anon(c)
+    other = _session(c)
     other_id = other.json()["user"]["id"]
     csrf = other.json()["csrf_token"]
     start = c.post(
@@ -537,8 +537,8 @@ def test_callback_browser_redirects(make_client):
 def test_notifications_consent_revoked_unlinks(make_client):
     fake = FakeApple()
     c = _client(make_client, fake)
-    anon = _anon(c)
-    csrf = anon.json()["csrf_token"]
+    first = _session(c)
+    csrf = first.json()["csrf_token"]
     start = c.post(
         "/api/auth/apple/start", json={"intent": "link"},
         headers={**JSON_H, "X-CSRF-Token": csrf},
@@ -558,7 +558,7 @@ def test_notifications_consent_revoked_unlinks(make_client):
     )
     assert note.status_code == 200, note.text
     left = {m["provider"] for m in c.get("/api/auth/methods").json()["methods"]}
-    assert left == {"anonymous"}
+    assert left == {"phone"}
 
 
 def test_notifications_account_delete_last_method(make_client):

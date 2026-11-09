@@ -5,7 +5,7 @@ import time
 
 from fastapi import FastAPI, HTTPException, Request
 
-from talking.auth.deps import require_user
+from talking.identity import reject_sender_spoof, request_user_id
 
 from ..security import TokenBucket, client_ip
 from ..unfurl.service import UnfurlService
@@ -63,7 +63,7 @@ def register_message_routes(
 
     @app.get("/api/chat/messages")
     def list_messages(request: Request, conversation_id: str = DEFAULT_CONVERSATION, limit: int = 50):
-        uid = require_user(request).id
+        uid = request_user_id(request)
         conv = conversation_id or DEFAULT_CONVERSATION
         if not _can_access(store, uid, conv):
             raise HTTPException(403, "not a participant")
@@ -80,7 +80,7 @@ def register_message_routes(
     async def post_message(request: Request):
         if not limiter.allow(client_ip(request)):
             raise HTTPException(429, "rate limit")
-        uid = require_user(request).id
+        uid = request_user_id(request)
         try:
             data = await request.json()
         except Exception:
@@ -92,9 +92,7 @@ def register_message_routes(
             raise HTTPException(400, "empty")
         if len(text) > MAX_TEXT:
             raise HTTPException(400, "text too long")
-        claimed = data.get("sender_id")
-        if claimed is not None and str(claimed) and str(claimed) != uid:
-            raise HTTPException(403, "sender_id spoofing")
+        reject_sender_spoof(data.get("sender_id"), uid)
         sender = uid
         conv = str(data.get("conversation_id") or DEFAULT_CONVERSATION)[:64]
         urls = extract_urls(text)
@@ -118,7 +116,7 @@ def register_message_routes(
     async def patch_message(message_id: str, request: Request):
         if not edit_limiter.allow(client_ip(request)):
             raise HTTPException(429, "rate limit")
-        uid = require_user(request).id
+        uid = request_user_id(request)
         try:
             data = await request.json()
         except Exception:
@@ -127,9 +125,7 @@ def register_message_routes(
             raise HTTPException(400, "invalid JSON")
         if "text" not in data:
             raise HTTPException(422, "text required")
-        claimed = data.get("sender_id")
-        if claimed is not None and str(claimed) and str(claimed) != uid:
-            raise HTTPException(403, "sender_id spoofing")
+        reject_sender_spoof(data.get("sender_id"), uid)
         sender = uid
         conv = data.get("conversation_id")
         conv_s = str(conv)[:64] if conv else None
@@ -160,6 +156,6 @@ def register_message_routes(
             msg.urls = urls
             msg.preview = preview
             public = msg.to_dict()
-            hub.publish_edit(public)
+            hub.publish_edit(public, user_id=uid)
             return {"ok": True, "message": public, "changed": True}
         return {"ok": True, "message": msg.to_dict(), "changed": False}

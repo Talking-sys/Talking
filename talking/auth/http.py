@@ -154,17 +154,6 @@ def register_auth(app: FastAPI) -> None:
     install_auth_log_filter(svc.log_salt)
     app.add_middleware(AuthMiddleware)
 
-    @app.post("/api/auth/anonymous")
-    async def anonymous(request: Request):
-        ip = client_ip(request)
-        if not limiter.allow(f"auth:anon:{ip}", 10, 3600):
-            raise HTTPException(429, "rate limit")
-        try:
-            out = await svc.create_anonymous(ip=ip, user_agent=request.headers.get("user-agent"))
-        except AuthError as e:
-            raise _err(e)
-        return attach_session_response(request, out, 201)
-
     @app.post("/api/auth/recover")
     async def recover(request: Request):
         ip = client_ip(request)
@@ -219,7 +208,7 @@ def register_auth(app: FastAPI) -> None:
         if user.auth_mode == "local":
             return {
                 "id": user.id, "status": "active", "auth_mode": "local",
-                "anonymous": True, "methods": [], "profile_private": True,
+                "anonymous": False, "methods": [], "profile_private": True,
             }
         rec = user.user or await svc.store.get_user(user.id)
         methods = await svc.public_methods(user.id)
@@ -338,7 +327,7 @@ def register_auth(app: FastAPI) -> None:
     async def auth_providers():
         return {
             "providers": {
-                "anonymous": True,
+                "anonymous": False,
                 "phone": True,
                 "apple": svc.apple_enabled(),
                 "google": False,

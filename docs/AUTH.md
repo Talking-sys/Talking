@@ -16,8 +16,8 @@ production path).
 
 | `AUTH_MODE` | When | Behaviour |
 |---|---|---|
-| `local` (default in development and tests) | Home Wi-Fi translator, pytest, Playwright | Single user id (`USER_ID` or `local`). No cookies required. Existing chat/WS tests stay green. |
-| `accounts` | Hosted multi-user | Cookie sessions, CSRF, anonymous + phone + Apple (when configured). Missing WS cookies/tokens close the socket. |
+| `local` (default in development and tests) | Home Wi-Fi translator, pytest, Playwright | Single operator id (`USER_ID` or `local`). Not an anonymous user. HTTP uses that identity; WebSockets still require a signed token. |
+| `accounts` | Hosted multi-user | Cookie sessions, CSRF, phone + Apple (when configured). Unauthenticated clients are not users. Missing WS cookies/tokens close the socket. |
 
 `AUTH_MODE=local` is **refused** when `APP_ENV=production`. Production also requires
 `APP_SECRET_KEY` (≥32 chars) and `LOG_SALT`. Production `accounts` requires `DATABASE_URL`.
@@ -33,10 +33,11 @@ unset, which defaults to console) is **refused** in production.
   `login_challenges` (phone OTP / future email codes).
 - `users.status` is `active | deleting | deleted`. Nickname unique and nullable.
   `profile_private` defaults true. User ids are UUIDs.
-- `identities` unique (`provider`, `subject`). Providers here: `anonymous`, `phone`, `apple`.
+- `identities` unique (`provider`, `subject`). Providers here: `phone`, `apple`.
   Email columns are used for Apple (hashed + AES-GCM). Phone subject is `HMAC(phone)`;
   `phone_enc` is AES-GCM with `DB_ENCRYPTION_KEY` (hash-only if the key is missing).
   Apple subject is Apple’s opaque `sub` (needed to match server-to-server notifications).
+  There is **no anonymous provider** and no anonymous account creation.
 - Storage interface: in-memory (`AUTH_MODE=local` and tests) and Postgres (`AUTH_MODE=accounts`
   with `DATABASE_URL`).
 - CI runs Postgres and an Alembic upgrade / downgrade / upgrade test (`TEST_DATABASE_URL`).
@@ -58,8 +59,7 @@ In production the `__Host-` / `__Secure-` names are required (HTTPS).
 
 Endpoints:
 
-- `POST /api/auth/anonymous` — create anonymous account; return a recovery code **once**; store hash only
-- `POST /api/auth/recover` — recovery code → new session (single use)
+- `POST /api/auth/recover` — recovery code → new session (single use), if a code was issued
 - `POST /api/auth/refresh`
 - `POST /api/auth/logout` / `POST /api/auth/logout-all`
 - `GET /api/auth/me` / `GET /api/auth/sessions` / `DELETE /api/auth/sessions/{id}`
@@ -67,19 +67,21 @@ Endpoints:
 - `GET /api/auth/providers` — which sign-in methods are configured (`apple` is false until env is set)
 
 CSRF: `SameSite=Lax` + `Origin` / `Sec-Fetch-Site` + `X-CSRF-Token` on POST/PATCH/DELETE
-when a session cookie is present. CORS with credentials only for an explicit allowlist
-(`PUBLIC_ORIGIN` and `APP_CORS_ORIGINS`). Exempt: `/api/sdk/`, commercial webhook, Apple `form_post` callback, Apple
-server-to-server notifications.
+when a session cookie is present. **Empty `Origin` is rejected.** CORS with credentials
+only for an explicit allowlist (`PUBLIC_ORIGIN` and `APP_CORS_ORIGINS`). Exempt:
+`/api/sdk/`, commercial webhook, Apple `form_post` callback, Apple server-to-server
+notifications.
 
-`current_user` (via `AuthMiddleware` + `require_user`) replaces `_uid_from_app` in chat,
-voice-translate, history, and commercial licence checks. Request-body `sender_id` is
+Identity lives in `talking/identity.py`. `request_user_id` uses the signed-in session
+in `accounts` mode and the operator id in `local` mode. Request-body `sender_id` is
 ignored; a mismatch is **403**. Messages are readable/editable only by participants
 (file store is already per-user; in-memory tests check senders).
 
 WebSockets (`/ws`, `/ws/chat`, `/ws/translate/live`): session cookie **or** a short
-`/api/ws-token` query param, plus Origin (CSWSH). In `accounts` mode a missing token
-is no longer “local”. `/api/ws-token` is signed-in only, **60 s**, bound to the session.
-`SocketRegistry` closes sockets of revoked sessions (`logout-all`, family reuse).
+`/api/ws-token` query param, plus Origin (CSWSH). A missing token is never “local”
+(including in `AUTH_MODE=local`). `/api/ws-token` is signed-in only; in `accounts`
+mode it is **60 s** and bound to the session. `SocketRegistry` closes sockets of
+revoked sessions (`logout-all`, family reuse).
 
 Auth endpoints are rate-limited (Redis if `REDIS_URL` is up, else memory). Logs hash
 `user_id` with `LOG_SALT` and redact phones, emails, tokens, and codes.
@@ -199,7 +201,7 @@ Paid **Apple Developer Program** membership. Then:
 | 3 | Google OAuth (`openid email profile` only). No auto-merge on email. |
 | 4 | Passkeys / WebAuthn. |
 | 5 | ~~Sign in with Apple~~ **done** (this document). Equal-prominence **button** is stage 6. |
-| 6 | Onboarding screens (Google / Apple / email / passkey / phone / anonymous). |
+| 6 | Onboarding screens (Google / Apple / email / passkey / phone). No anonymous accounts. |
 | 7 | Account deletion, export, audit log UI; 90-day `auth_events` purge job. Full wipe after Apple `account-delete` when other methods remain is still a product decision. |
 
 ## Effort (implementation, not calendar)

@@ -39,7 +39,7 @@ class Identity(Base):
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     user_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False, index=True)
-    provider: Mapped[str] = mapped_column(String(32), nullable=False)  # anonymous | phone | google | apple | email
+    provider: Mapped[str] = mapped_column(String(32), nullable=False)  # phone | google | apple | email
     subject: Mapped[str] = mapped_column(String(128), nullable=False)
     email_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
     email_enc: Mapped[str | None] = mapped_column(Text, nullable=True)
