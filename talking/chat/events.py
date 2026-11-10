@@ -73,5 +73,8 @@ def register_chat_ws(app: FastAPI) -> None:
         except WebSocketDisconnect:
             pass
         finally:
+            sockets = getattr(app.state, "auth_sockets", None)
+            if sockets is not None:
+                sockets.discard(ws)
             hub.unsubscribe(uid, q)
             send_task.cancel()

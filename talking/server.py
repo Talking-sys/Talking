@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
@@ -12,6 +13,10 @@ from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 
 from . import __version__
+from .auth import register_auth
+from .auth.crypto import WS_TOKEN_TTL_LOCAL_S, WS_TOKEN_TTL_S
+from .auth.deps import require_user
+from .auth.http import validate_auth_settings
 from .chat.events import ensure_hub, register_chat_ws
 from .chat.http import register_message_routes
 from .chat.messages import MessageStore
@@ -23,7 +28,7 @@ from .config import Settings, WHISPER_MODELS
 from .engine import Engine
 from .games import not_implemented as games_stub
 from .ids import secure_dir
-from .identity import handshake_websocket, server_user_id
+from .identity import handshake_websocket, request_user_id, server_user_id
 from .languages import languages_payload
 from .sdk_api import SdkError, sdk_error_response, sdk_router
 from .security import SecurityHeadersMiddleware, TokenBucket, client_ip, load_server_secret, sign
@@ -45,16 +50,25 @@ def _html(name: str, settings: Settings) -> HTMLResponse:
     return HTMLResponse(html)
 
 
+@asynccontextmanager
+async def _lifespan(app: FastAPI):
+    yield
+    engine = getattr(app.state, "auth_engine", None)
+    if engine is not None:
+        await engine.dispose()
+
+
 def create_app(settings: Settings | None = None, engine: Engine | None = None,
                unfurl: UnfurlService | None = None,
                messages: MessageStore | None = None) -> FastAPI:
     s = settings or Settings()
+    validate_auth_settings(s)
     secure_dir(s.data_dir)
     eng = engine or Engine(s)
     secret = load_server_secret(s.data_dir, s.secret_key)
     app = FastAPI(title=s.app_name, version=__version__,
                   docs_url="/docs" if not s.production else None,
-                  redoc_url=None)
+                  redoc_url=None, lifespan=_lifespan)
     app.state.engine = eng
     app.state.settings = s
     app.state.secret = secret
@@ -70,15 +84,21 @@ def create_app(settings: Settings | None = None, engine: Engine | None = None,
     app.state.chat_translations = MessageTranslationCache()
     ensure_hub(app)
 
-    origins = [o.strip() for o in s.cors_origins.split(",") if o.strip()]
+    origins = [o.strip().rstrip("/") for o in s.cors_origins.split(",") if o.strip()]
+    if (s.public_origin or "").strip():
+        origins.append(s.public_origin.strip().rstrip("/"))
+    origins = list(dict.fromkeys(origins))
     if origins:
         app.add_middleware(
-            CORSMiddleware, allow_origins=origins, allow_methods=["GET", "POST", "PATCH"],
-            allow_headers=["Content-Type", "Authorization", "X-Talking-Api-Key", "X-Talking-App-Id"],
+            CORSMiddleware, allow_origins=origins,
+            allow_methods=["GET", "POST", "PATCH", "DELETE"],
+            allow_headers=["Content-Type", "Authorization", "X-Talking-Api-Key",
+                           "X-Talking-App-Id", "X-CSRF-Token"],
             expose_headers=["Retry-After", "X-RateLimit-Limit", "X-RateLimit-Remaining"],
             allow_credentials=True, max_age=600,
         )
     app.add_middleware(SecurityHeadersMiddleware, production=s.production)
+    register_auth(app)
     app.mount("/static", StaticFiles(directory=STATIC), name="static")
 
     ws_limiter = TokenBucket(s.ws_connects_per_min)
@@ -192,6 +212,8 @@ def create_app(settings: Settings | None = None, engine: Engine | None = None,
             "whisper_models": list(WHISPER_MODELS),
             "buffer_seconds": s.buffer_seconds,
             "max_segment_s": s.max_segment_s,
+            "user_id": eng.store.get("user_id") or "local",
+            "auth_mode": s.auth_mode,
         }
 
     @app.post("/api/settings")
@@ -212,28 +234,35 @@ def create_app(settings: Settings | None = None, engine: Engine | None = None,
         return eng.store.update(**kw)
 
     @app.get("/api/ws-token")
-    def ws_token():
-        uid = server_user_id(app)
-        return {"token": sign(secret, {"u": uid}, "ws", ttl=3600)}
+    def ws_token(request: Request):
+        user = require_user(request)
+        if user.auth_mode == "accounts":
+            if user.session is None:
+                raise HTTPException(401, "not signed in")
+            return {
+                "token": app.state.auth.ws_token(user.session, WS_TOKEN_TTL_S),
+                "expires_in": WS_TOKEN_TTL_S,
+            }
+        return {"token": sign(secret, {"u": user.id}, "ws", ttl=WS_TOKEN_TTL_LOCAL_S)}
 
     @app.get("/api/history")
-    def history():
-        uid = server_user_id(app)
+    def history(request: Request):
+        uid = request_user_id(request)
         return [e.to_dict() for e in eng.history_for(uid).entries()]
 
     @app.get("/api/history.json")
-    def history_json():
-        uid = server_user_id(app)
+    def history_json(request: Request):
+        uid = request_user_id(request)
         return JSONResponse(json.loads(eng.history_for(uid).export_json() or "[]"))
 
     @app.get("/api/history.txt", response_class=PlainTextResponse)
-    def history_txt():
-        uid = server_user_id(app)
+    def history_txt(request: Request):
+        uid = request_user_id(request)
         return eng.history_for(uid).export_text()
 
     @app.post("/api/history/clear")
-    def history_clear():
-        uid = server_user_id(app)
+    def history_clear(request: Request):
+        uid = request_user_id(request)
         eng.history_for(uid).clear()
         return {"ok": True}
 
@@ -277,8 +306,8 @@ def create_app(settings: Settings | None = None, engine: Engine | None = None,
         return eng.commercial.status()
 
     @app.get("/api/commercial/license")
-    def commercial_license():
-        uid = server_user_id(app)
+    def commercial_license(request: Request):
+        uid = request_user_id(request)
         return eng.commercial.license_status(uid)
 
     @app.get("/api/commercial/talk-coins")
@@ -392,6 +421,7 @@ def create_app(settings: Settings | None = None, engine: Engine | None = None,
         except WebSocketDisconnect:
             pass
         finally:
+            app.state.auth_sockets.discard(ws)
             sess.close()
             send_task.cancel()
 

@@ -31,6 +31,16 @@ class ChatHub:
         if not bucket:
             self._subs.pop(user_id, None)
 
+    def online(self, user_id: str) -> bool:
+        return bool(self._subs.get(user_id))
+
+    def publish_users(self, user_ids, event: dict) -> None:
+        seen: set[str] = set()
+        for uid in user_ids or ():
+            if uid and uid not in seen:
+                seen.add(uid)
+                self.publish(uid, event)
+
     def publish(self, user_id: str, event: dict) -> None:
         """Fan-out. Safe from worker threads (transcription jobs)."""
         def _fanout() -> None:
@@ -54,13 +64,21 @@ class ChatHub:
         except RuntimeError:
             _fanout()
 
-    def publish_edit(self, msg_public: dict, user_id: str | None = None) -> None:
+    def publish_edit(
+        self,
+        msg_public: dict,
+        user_id: str | None = None,
+        extra_user_ids: list[str] | None = None,
+    ) -> None:
         event = {"type": "message_edited", "message": msg_public}
         keys = {
             str(user_id or ""),
             str(msg_public.get("sender_id") or ""),
             str(msg_public.get("conversation_id") or msg_public.get("dialog_id") or ""),
         }
+        for uid in extra_user_ids or ():
+            if uid:
+                keys.add(str(uid))
         keys.discard("*")
         for key in keys:
             if key:

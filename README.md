@@ -58,14 +58,21 @@ Compose sets `DATABASE_URL` and `REDIS_URL`. The app still runs if those pings f
 | `APP_MAX_SEGMENT_S` | `18` | Utterance cap (15–20 s) |
 | `APP_BUFFER_SECONDS` | `180` | Live + offline ring |
 | `APP_TTS` / `APP_TTS_PROVIDERS` | off / empty | Default = browser. Set `gtts` for MIT server TTS |
-| `DATABASE_URL` | empty | Postgres/Neon. Empty = local files |
-| `REDIS_URL` | empty | Optional. Unfurl cache uses Redis when set, else in-memory |
+| `DATABASE_URL` | empty | Postgres/Neon. Empty = local files. Required for `AUTH_MODE=accounts` in production |
+| `REDIS_URL` | empty | Optional. Unfurl cache and auth rate limits use Redis when set, else in-memory |
+| `AUTH_MODE` | `local` | `local` = single-user (dev/tests). `accounts` = cookies + CSRF. Refused in production if `local` |
+| `PUBLIC_ORIGIN` | empty | Canonical https origin; CORS credentials allowlist with `APP_CORS_ORIGINS` |
+| `LOG_SALT` | empty | HMAC salt for user ids in logs. Required in production |
+| `DB_ENCRYPTION_KEY` | empty | AES-GCM for phone and email at rest (hash-only if unset and no fallback secret) |
+| `SMS_PROVIDER` | `console` | `console` = local/dev sink only (refused in production). `twilio` = Verify SMS (voice is explicit fallback). See `docs/AUTH.md` |
+| `MAIL_PROVIDER` | `console` | `console` = local/dev sink only (refused in production). `smtp` = generic SMTP. See `docs/AUTH.md` |
+| `APPLE_CLIENT_ID` / `APPLE_TEAM_ID` / `APPLE_KEY_ID` / `APPLE_PRIVATE_KEY` or `APPLE_PRIVATE_KEY_FILE` / `APPLE_REDIRECT_URI` | empty | Sign in with Apple. Off unless every value is set. HTTPS redirect URI must match the Developer account exactly. Never commit the .p8. See `docs/AUTH.md` |
 | `S3_ENDPOINT` `S3_BUCKET` `S3_ACCESS_KEY` `S3_SECRET_KEY` `S3_REGION` | empty | R2/MinIO/AWS archive. Empty = local JSONL |
 | `COMMERCIAL_API_URL` / `COMMERCIAL_API_TOKEN` / `COMMERCIAL_WEBHOOK_SECRET` | empty | Proprietary service. Empty = stubs |
 | `COMMERCIAL_DEV_ENTITLEMENTS` / `COMMERCIAL_DEV_PREMIUM` | empty / off | Local premium stub (ignored in production) |
 | `CHAT_STT_PROVIDER` | `faster-whisper` | On-demand note STT. Cloud `openai-compatible` is off |
 | `VOICE_TRANSLATE_LIVE_PREMIUM` | `0` | `1` gates live hold-to-talk on the commercial licence hook; default free |
-| `APP_SECRET_KEY` | auto file | HMAC for WS tokens (do not commit) |
+| `APP_SECRET_KEY` | auto file | HMAC for cookies and WS tokens (do not commit). Required in production |
 | `UNFURL_STUB` | `0` | `1` skips outbound HTTP (tests / demo cards) |
 | `UNFURL_RATE_PER_MIN` | `20` | Unfurl API rate limit per IP |
 | `CHAT_MSG_RATE_PER_MIN` | `10` | Spec: 10 messages / min |
@@ -120,6 +127,7 @@ Never put real keys in source. Empty `SDK_API_KEYS` disables the SDK routes.
 ## Docs
 
 - `docs/ARCHITECTURE.md` — folders and API boundary
+- `docs/AUTH.md` — M10 stages 0–1 + phone (sessions, CSRF, Twilio Verify)
 - `docs/VOICE_TRANSCRIPTION.md` — premium on-demand note STT, merge notes vs #5 / editing
 - `docs/ROADMAP.md` — next PRs, including unverified vendor names
 - `docs/sdk/` — game-embed SDK (EN + RU), plan, OpenAPI

@@ -30,6 +30,7 @@
       lock: "Замок",
       slide: "← Отмена",
       chatNav: "Чат",
+      accountNav: "Аккаунт",
       back: "Назад",
       net: "подключение…",
       offline: "нет связи",
@@ -67,6 +68,7 @@
       lock: "Lock",
       slide: "← Cancel",
       chatNav: "Chat",
+      accountNav: "Account",
       back: "Back",
       net: "connecting…",
       offline: "offline",
@@ -134,6 +136,7 @@
     $("holdLabel").textContent = t("hold");
     $("navChat").textContent = t("chatNav");
     $("ftChat").textContent = t("chatNav");
+    if ($("ftAccount")) $("ftAccount").textContent = t("accountNav");
     $("langSwitch").textContent = state.uiLang === "ru" ? "EN" : "RU";
     $("btnStop").textContent = t("stop");
     $("btnSend").textContent = t("send");

@@ -1,6 +1,6 @@
 # Google OAuth scopes checklist
 
-Talking will request **only non-sensitive** OpenID scopes. SMS login is out of v1.
+Talking will request **only non-sensitive** OpenID scopes. Phone SMS sign-in is in v1 (Twilio Verify); this checklist is Google OAuth only.
 
 | Scope | Use | Sensitive? | In v1? |
 |---|---|---|---|

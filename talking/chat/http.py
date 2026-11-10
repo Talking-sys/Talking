@@ -17,6 +17,24 @@ from .messages import DEFAULT_CONVERSATION, MAX_TEXT, MessageStore
 from .translation_cache import MessageTranslationCache
 
 
+def _can_access(store: MessageStore, user_id: str, conversation_id: str) -> bool:
+    """File-backed ChatStore is namespaced by user; direct dialogs check membership."""
+    conv = conversation_id or DEFAULT_CONVERSATION
+    chat = getattr(store, "_chat", None)
+    if chat is not None:
+        try:
+            chat.get_dialog(user_id, conv)
+            return True
+        except (KeyError, ValueError):
+            return conv in (DEFAULT_CONVERSATION, user_id, "local")
+    if conv in (DEFAULT_CONVERSATION, user_id, "local"):
+        return True
+    msgs = store.list(conv, limit=store.max_per_conversation, user_id=user_id)
+    if not msgs:
+        return True
+    return any(m.sender_id == user_id for m in msgs)
+
+
 def _refresh_preview(unfurl: UnfurlService, text: str, old_urls: list[str], old_preview: dict | None):
     urls = extract_urls(text)
     if not first_url_changed(old_urls, urls):
@@ -52,11 +70,13 @@ def register_message_routes(
     def list_messages(request: Request, conversation_id: str = DEFAULT_CONVERSATION, limit: int = 50):
         uid = request_user_id(request)
         conv = conversation_id or DEFAULT_CONVERSATION
+        if not _can_access(store, uid, conv):
+            raise HTTPException(403, "not a participant")
         return {
             "ok": True,
             "conversation_id": conv,
             "user_id": uid,
-            "messages": [m.to_dict() for m in store.list(conv, limit)],
+            "messages": [m.to_dict() for m in store.list(conv, limit, user_id=uid)],
             "edit_window_s": _window(request),
             "max_text": MAX_TEXT,
         }
@@ -80,6 +100,8 @@ def register_message_routes(
         reject_sender_spoof(data.get("sender_id"), uid)
         sender = uid
         conv = str(data.get("conversation_id") or DEFAULT_CONVERSATION)[:64]
+        if not _can_access(store, uid, conv):
+            raise HTTPException(403, "not a participant")
         urls = extract_urls(text)
         preview = None
         if urls:
@@ -93,6 +115,7 @@ def register_message_routes(
             conversation_id=conv,
             urls=urls,
             preview=preview,
+            user_id=uid,
         )
         return {"ok": True, "message": msg.to_dict()}
 
@@ -113,9 +136,11 @@ def register_message_routes(
         sender = uid
         conv = data.get("conversation_id")
         conv_s = str(conv)[:64] if conv else None
-        old = store.get(message_id, conv_s)
+        old = store.get(message_id, conv_s, user_id=uid)
         if old is None:
             raise HTTPException(404, "message not found")
+        if old.sender_id != uid:
+            raise HTTPException(403, "not the author")
         old_text = old.text
         old_urls = list(old.urls)
         old_preview = old.preview
@@ -128,6 +153,7 @@ def register_message_routes(
                 window_s=_window(request),
                 max_text=MAX_TEXT,
                 conversation_id=conv_s,
+                user_id=uid,
             )
         except EditError as e:
             raise HTTPException(e.status, e.message) from e
@@ -137,6 +163,13 @@ def register_message_routes(
             msg.urls = urls
             msg.preview = preview
             public = msg.to_dict()
-            hub.publish_edit(public, user_id=uid)
+            extra: list[str] = []
+            chat = getattr(store, "_chat", None)
+            if chat is not None:
+                try:
+                    extra = list(chat.participants(uid, msg.dialog_id))
+                except (KeyError, ValueError):
+                    extra = []
+            hub.publish_edit(public, user_id=uid, extra_user_ids=extra)
             return {"ok": True, "message": public, "changed": True}
         return {"ok": True, "message": msg.to_dict(), "changed": False}
