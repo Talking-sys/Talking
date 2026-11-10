@@ -18,11 +18,14 @@ from .crypto import (
     REFRESH_COOKIE,
     REFRESH_COOKIE_DEV,
     REFRESH_TTL_S,
+    email_subject,
     load_encryption_key,
     phone_subject,
 )
 from .deps import AuthMiddleware, read_refresh_cookie, require_user
+from .email_util import EmailError, normalize_email_channel, parse_email
 from .logfilter import install_auth_log_filter
+from .mail import build_mail_provider, mail_provider_name, smtp_configured
 from .phone_util import PhoneError, country_allowed, normalize_phone_channel, parse_e164
 from .providers import build_phone_provider, sms_provider_name, twilio_configured
 from .rate_limit import AuthRateLimiter
@@ -60,6 +63,20 @@ def validate_auth_settings(settings) -> None:
             raise RuntimeError(
                 "TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, and TWILIO_VERIFY_SERVICE_SID "
                 "are required when APP_ENV=production"
+            )
+        mail = mail_provider_name(settings) or "console"
+        if mail in ("console", ""):
+            raise RuntimeError(
+                "MAIL_PROVIDER=console is refused when APP_ENV=production; "
+                "set MAIL_PROVIDER=smtp with SMTP_HOST and SMTP_FROM"
+            )
+        if mail != "smtp":
+            raise RuntimeError(
+                f"MAIL_PROVIDER={mail} is refused when APP_ENV=production; use smtp"
+            )
+        if not smtp_configured(settings):
+            raise RuntimeError(
+                "SMTP_HOST and SMTP_FROM are required when APP_ENV=production"
             )
     validate_apple_settings(settings)
 
@@ -124,8 +141,10 @@ def build_auth_stack(settings, secret: bytes):
     svc = AuthService(
         store, secret=secret, log_salt=salt, enc_key=enc,
         phone_provider=build_phone_provider(settings),
+        mail_provider=build_mail_provider(settings),
         apple=build_apple_client(settings),
         sign_fn=sign, allow_debug_otp=allow_debug,
+        app_name=getattr(settings, "app_name", None) or "Talking",
     )
     limiter = AuthRateLimiter(settings.redis_url)
     sockets = SocketRegistry()
@@ -323,6 +342,118 @@ def register_auth(app: FastAPI) -> None:
         except AuthError as e:
             raise _err(e)
 
+    def _email_origin(request: Request) -> str:
+        pub = (s.public_origin or "").strip().rstrip("/")
+        if pub:
+            return pub
+        return str(request.base_url).rstrip("/")
+
+    @app.post("/api/auth/email/start")
+    async def email_start(request: Request):
+        data = await _json(request)
+        try:
+            email = parse_email(str(data.get("email") or ""))
+        except EmailError as e:
+            raise HTTPException(400, str(e))
+        try:
+            channel = normalize_email_channel(data.get("channel"))
+        except EmailError as e:
+            raise HTTPException(400, str(e))
+        if s.production and getattr(svc.mail_provider, "name", "") == "console":
+            raise HTTPException(503, "email_unconfigured")
+        ip = client_ip(request)
+        subj = email_subject(svc.log_salt, email)
+        if not limiter.allow(f"auth:email:addr:{subj}", 3, 15 * 60):
+            raise HTTPException(429, "rate limit")
+        if not limiter.allow(f"auth:email:ip:{ip}", 10, 3600):
+            raise HTTPException(429, "rate limit")
+        uid = getattr(request.state, "user", None)
+        try:
+            return await svc.start_email(
+                email, channel, ip=ip,
+                user_id=(uid.id if uid and uid.authenticated else None),
+                origin=_email_origin(request),
+            )
+        except AuthError as e:
+            raise _err(e)
+
+    @app.post("/api/auth/email/verify")
+    async def email_verify(request: Request):
+        data = await _json(request)
+        try:
+            email = parse_email(str(data.get("email") or ""))
+        except EmailError as e:
+            raise HTTPException(400, str(e))
+        ip = client_ip(request)
+        if not limiter.allow(f"auth:email:verify:{ip}", 20, 3600):
+            raise HTTPException(429, "rate limit")
+        try:
+            out = await svc.verify_email(
+                email, str(data.get("code") or ""), ip=ip,
+                user_agent=request.headers.get("user-agent"),
+            )
+        except AuthError as e:
+            raise _err(e)
+        return attach_session_response(request, out)
+
+    @app.post("/api/auth/email/consume")
+    async def email_consume_post(request: Request):
+        data = await _json(request)
+        ip = client_ip(request)
+        if not limiter.allow(f"auth:email:consume:{ip}", 20, 3600):
+            raise HTTPException(429, "rate limit")
+        try:
+            out = await svc.consume_email_token(
+                str(data.get("token") or ""), ip=ip,
+                user_agent=request.headers.get("user-agent"),
+            )
+        except AuthError as e:
+            raise _err(e)
+        return attach_session_response(request, out)
+
+    @app.get("/api/auth/email/consume")
+    async def email_consume_get(request: Request):
+        token = (request.query_params.get("token") or "").strip()
+        ip = client_ip(request)
+        if not limiter.allow(f"auth:email:consume:{ip}", 20, 3600):
+            raise HTTPException(429, "rate limit")
+        try:
+            out = await svc.consume_email_token(
+                token, ip=ip, user_agent=request.headers.get("user-agent"),
+            )
+        except AuthError as e:
+            raise _err(e)
+        sess = out.pop("session")
+        refresh = out.pop("refresh")
+        resp = RedirectResponse("/", status_code=303)
+        set_session_cookies(resp, request, svc.access_token(sess), refresh)
+        return resp
+
+    @app.post("/api/auth/email/link")
+    async def email_link(request: Request):
+        user = require_user(request)
+        if user.auth_mode == "local":
+            raise HTTPException(400, "accounts_only")
+        data = await _json(request)
+        email_raw = str(data.get("email") or "").strip()
+        email = None
+        if email_raw:
+            try:
+                email = parse_email(email_raw)
+            except EmailError as e:
+                raise HTTPException(400, str(e))
+        try:
+            return await svc.link_email(
+                user.user, user.session,
+                email=email,
+                code=str(data.get("code") or "") or None,
+                token=str(data.get("token") or "") or None,
+                ip=client_ip(request),
+            )
+        except AuthError as e:
+            raise _err(e)
+
+
     @app.get("/api/auth/providers")
     async def auth_providers():
         return {
@@ -331,7 +462,7 @@ def register_auth(app: FastAPI) -> None:
                 "phone": True,
                 "apple": svc.apple_enabled(),
                 "google": False,
-                "email": False,
+                "email": True,
                 "passkey": False,
             }
         }

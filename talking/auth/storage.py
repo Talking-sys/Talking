@@ -41,6 +41,7 @@ class AuthStorage(Protocol):
     async def log_event(self, ev: AuthEventRecord) -> None: ...
     async def create_challenge(self, ch: ChallengeRecord) -> ChallengeRecord: ...
     async def get_challenge(self, challenge_id: str) -> ChallengeRecord | None: ...
+    async def get_challenge_by_code_hash(self, code_hash: str) -> ChallengeRecord | None: ...
     async def latest_challenge(self, subject_hash: str, kind: str) -> ChallengeRecord | None: ...
     async def save_challenge(self, ch: ChallengeRecord) -> ChallengeRecord: ...
     async def aclose(self) -> None: ...
@@ -181,6 +182,12 @@ class MemoryAuthStorage:
 
     async def get_challenge(self, challenge_id: str) -> ChallengeRecord | None:
         return self.challenges.get(challenge_id)
+
+    async def get_challenge_by_code_hash(self, code_hash: str) -> ChallengeRecord | None:
+        rows = [c for c in self.challenges.values() if c.code_hash == code_hash]
+        if not rows:
+            return None
+        return max(rows, key=lambda c: c.created_at)
 
     async def latest_challenge(self, subject_hash: str, kind: str) -> ChallengeRecord | None:
         rows = [c for c in self.challenges.values() if c.subject_hash == subject_hash and c.kind == kind]
@@ -444,6 +451,19 @@ class PostgresAuthStorage:
             row = await db.get(LoginChallenge, _uuid(challenge_id))
             return _chal_rec(row) if row else None
 
+    async def get_challenge_by_code_hash(self, code_hash: str) -> ChallengeRecord | None:
+        from sqlalchemy import desc, select
+        from .models import LoginChallenge
+        async with self._sf() as db:
+            q = await db.execute(
+                select(LoginChallenge)
+                .where(LoginChallenge.code_hash == code_hash)
+                .order_by(desc(LoginChallenge.created_at))
+                .limit(1)
+            )
+            row = q.scalar_one_or_none()
+            return _chal_rec(row) if row else None
+
     async def latest_challenge(self, subject_hash: str, kind: str) -> ChallengeRecord | None:
         from sqlalchemy import desc, select
         from .models import LoginChallenge
@@ -520,6 +540,7 @@ def _chal_rec(row) -> ChallengeRecord:
         attempts=row.attempts, max_attempts=row.max_attempts, created_at=_dt(row.created_at),
         expires_at=_dt(row.expires_at), consumed_at=_dt(row.consumed_at) if row.consumed_at else None,
         ip_hash=row.ip_hash, user_id=str(row.user_id) if row.user_id else None,
+        target_enc=row.target_enc,
     )
 
 
@@ -529,6 +550,7 @@ def _chal_model(ch: ChallengeRecord):
         id=_uuid(ch.id), kind=ch.kind, subject_hash=ch.subject_hash, channel=ch.channel,
         provider=ch.provider, provider_ref=ch.provider_ref, code_hash=ch.code_hash,
         attempts=ch.attempts, max_attempts=ch.max_attempts, created_at=ch.created_at,
-        expires_at=ch.expires_at, consumed_at=ch.consumed_at, ip_hash=ch.ip_hash,
+        expires_at=ch.expires_at, consumed_at=ch.consumed_at,         ip_hash=ch.ip_hash,
         user_id=_uuid(ch.user_id) if ch.user_id else None,
+        target_enc=ch.target_enc,
     )
