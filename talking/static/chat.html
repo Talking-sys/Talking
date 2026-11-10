@@ -10,12 +10,38 @@
   <link rel="stylesheet" href="/static/chat.css">
 </head>
 <body class="chat-page">
+  <aside id="dialogDrawer" class="dialog-drawer" hidden>
+    <div class="drawer-head">
+      <strong data-i18n="chats">Чаты</strong>
+      <button type="button" id="closeDrawer" class="icon-btn" aria-label="Close">×</button>
+    </div>
+    <form id="nickForm" class="nick-form" autocomplete="off">
+      <label class="sr-only" for="myNick">Nickname</label>
+      <input id="myNick" maxlength="32" placeholder="nickname">
+      <button type="submit" id="saveNick">OK</button>
+    </form>
+    <form id="newChatForm" class="new-chat" autocomplete="off">
+      <label class="sr-only" for="nickSearch" data-i18n="findUser">Найти по нику</label>
+      <input id="nickSearch" maxlength="32" placeholder="@nick или invite" aria-autocomplete="list">
+      <button type="submit" id="startChat" data-i18n="start">Начать</button>
+    </form>
+    <ul id="nickHits" class="nick-hits" hidden></ul>
+    <button type="button" id="makeInvite" class="text-btn" data-i18n="invite">Пригласительная ссылка</button>
+    <p id="inviteOut" class="invite-out" hidden></p>
+    <label class="check auto-tr-drawer">
+      <input type="checkbox" id="autoTranslate" checked>
+      <span data-i18n="autoTr">Перевод</span>
+    </label>
+    <ul id="dialogList" class="dialog-list"></ul>
+  </aside>
   <header class="top">
+    <button type="button" id="openDrawer" class="back" aria-label="Чаты">☰</button>
     <a class="back" href="/" aria-label="Назад к переводчику">←</a>
     <img class="logo" src="/static/logo.svg" alt="">
     <div class="brand">
       <strong id="dialogTitle">Чат</strong>
       <small id="net">кружочки · заметки</small>
+      <small id="typing" hidden></small>
     </div>
     <div class="ui-lang" role="group" aria-label="Interface language">
       <button type="button" id="uiLangRu" class="ui-lang-btn" aria-pressed="true" lang="ru">RU</button>
@@ -25,8 +51,14 @@
       <span class="sr-only" data-i18n="targetLang">Язык перевода заметок</span>
       <select id="target" aria-label="Язык перевода заметок"></select>
     </label>
+    <button type="button" id="peerMenuBtn" class="icon-btn" hidden aria-haspopup="menu">⋯</button>
     <a class="nav-chat" href="/translate">Голос</a>
   </header>
+  <div id="peerMenu" class="peer-menu" hidden>
+    <button type="button" id="blockPeer" data-i18n="block">Заблокировать</button>
+    <button type="button" id="reportPeer" data-i18n="report">Пожаловаться</button>
+    <button type="button" id="deleteLast" data-i18n="deleteMsg">Удалить последнее</button>
+  </div>
 
   <main id="feed" class="chat-feed" aria-live="polite">
     <p id="empty" class="empty" data-i18n="empty">Короткое нажатие справа переключает голос и кружочек. Удерживайте, чтобы записать; влево — отмена; вверх — замок.</p>

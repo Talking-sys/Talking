@@ -194,6 +194,13 @@ class Settings:
     chat_retention_seconds: int = field(
         default_factory=lambda: _env_int("CHAT_RETENTION_SECONDS", 0)
     )
+    # M4 nick rename cooldown (owner spec: once per 30 days). Tests may set 0.
+    chat_nick_rename_seconds: int = field(
+        default_factory=lambda: _env_int("CHAT_NICK_RENAME_SECONDS", 30 * 24 * 3600)
+    )
+    chat_invite_ttl_seconds: int = field(
+        default_factory=lambda: _env_int("CHAT_INVITE_TTL_SECONDS", 7 * 24 * 3600)
+    )
     # faster-whisper (default, local) | openai-compatible (off; audio would leave the server)
     chat_stt_provider: str = field(
         default_factory=lambda: _env("CHAT_STT_PROVIDER", "faster-whisper")
