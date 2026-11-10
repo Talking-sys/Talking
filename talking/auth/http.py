@@ -2,12 +2,15 @@
 from __future__ import annotations
 
 import logging
+from urllib.parse import urlencode
+
 from fastapi import FastAPI, HTTPException, Request, Response
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, RedirectResponse
 
 from talking.db import make_engine, make_session_factory
 from talking.security import client_ip, sign
 
+from .apple import build_apple_client, validate_apple_settings
 from .crypto import (
     ACCESS_COOKIE,
     ACCESS_COOKIE_DEV,
@@ -15,11 +18,14 @@ from .crypto import (
     REFRESH_COOKIE,
     REFRESH_COOKIE_DEV,
     REFRESH_TTL_S,
+    email_subject,
     load_encryption_key,
     phone_subject,
 )
 from .deps import AuthMiddleware, read_refresh_cookie, require_user
+from .email_util import EmailError, normalize_email_channel, parse_email
 from .logfilter import install_auth_log_filter
+from .mail import build_mail_provider, mail_provider_name, smtp_configured
 from .phone_util import PhoneError, country_allowed, normalize_phone_channel, parse_e164
 from .providers import build_phone_provider, sms_provider_name, twilio_configured
 from .rate_limit import AuthRateLimiter
@@ -58,6 +64,21 @@ def validate_auth_settings(settings) -> None:
                 "TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, and TWILIO_VERIFY_SERVICE_SID "
                 "are required when APP_ENV=production"
             )
+        mail = mail_provider_name(settings) or "console"
+        if mail in ("console", ""):
+            raise RuntimeError(
+                "MAIL_PROVIDER=console is refused when APP_ENV=production; "
+                "set MAIL_PROVIDER=smtp with SMTP_HOST and SMTP_FROM"
+            )
+        if mail != "smtp":
+            raise RuntimeError(
+                f"MAIL_PROVIDER={mail} is refused when APP_ENV=production; use smtp"
+            )
+        if not smtp_configured(settings):
+            raise RuntimeError(
+                "SMTP_HOST and SMTP_FROM are required when APP_ENV=production"
+            )
+    validate_apple_settings(settings)
 
 
 def _https_request(request: Request) -> bool:
@@ -120,7 +141,10 @@ def build_auth_stack(settings, secret: bytes):
     svc = AuthService(
         store, secret=secret, log_salt=salt, enc_key=enc,
         phone_provider=build_phone_provider(settings),
+        mail_provider=build_mail_provider(settings),
+        apple=build_apple_client(settings),
         sign_fn=sign, allow_debug_otp=allow_debug,
+        app_name=getattr(settings, "app_name", None) or "Talking",
     )
     limiter = AuthRateLimiter(settings.redis_url)
     sockets = SocketRegistry()
@@ -138,6 +162,32 @@ def attach_session_response(request: Request, body: dict, status: int = 200) -> 
     return resp
 
 
+def public_auth_config(settings, svc=None) -> dict:
+    """Enabled sign-in methods for the web UI. No secrets, no PII."""
+    allow = [
+        p.strip().upper()
+        for p in (settings.sms_country_allowlist or "").replace(";", ",").split(",")
+        if p.strip()
+    ]
+    phone_on = True
+    if svc is not None and getattr(svc, "phone_provider", None) is None:
+        phone_on = False
+    return {
+        "auth_mode": (settings.auth_mode or "local").strip().lower(),
+        "methods": {
+            "anonymous": False,
+            "recovery": True,
+            "phone": phone_on,
+            "google": bool(getattr(settings, "auth_google", False)),
+            "apple": bool(getattr(settings, "auth_apple", False)),
+            "email": bool(getattr(settings, "auth_email", False)),
+            "passkey": bool(getattr(settings, "auth_passkey", False)),
+        },
+        "default_region": (settings.sms_default_region or "").strip().upper(),
+        "country_allowlist": allow,
+    }
+
+
 def register_auth(app: FastAPI) -> None:
     s = app.state.settings
     store, svc, limiter, sockets, engine = build_auth_stack(s, app.state.secret)
@@ -148,6 +198,20 @@ def register_auth(app: FastAPI) -> None:
     app.state.auth_engine = engine
     install_auth_log_filter(svc.log_salt)
     app.add_middleware(AuthMiddleware)
+
+    @app.get("/signin")
+    def signin_page():
+        from talking.server import _html
+        return _html("auth.html", s)
+
+    @app.get("/account")
+    def account_page():
+        from talking.server import _html
+        return _html("account.html", s)
+
+    @app.get("/api/auth/config")
+    def auth_config():
+        return public_auth_config(s, svc)
 
     @app.post("/api/auth/recover")
     async def recover(request: Request):
@@ -240,9 +304,10 @@ def register_auth(app: FastAPI) -> None:
     @app.get("/api/auth/methods")
     async def list_methods(request: Request):
         user = require_user(request)
+        enabled = public_auth_config(s, svc)["methods"]
         if user.auth_mode == "local":
-            return {"methods": []}
-        return {"methods": await svc.public_methods(user.id)}
+            return {"methods": [], "enabled": enabled}
+        return {"methods": await svc.public_methods(user.id), "enabled": enabled}
 
     @app.delete("/api/auth/methods/{method_id}")
     async def delete_method(request: Request, method_id: str):
@@ -318,6 +383,210 @@ def register_auth(app: FastAPI) -> None:
         except AuthError as e:
             raise _err(e)
 
+    def _email_origin(request: Request) -> str:
+        pub = (s.public_origin or "").strip().rstrip("/")
+        if pub:
+            return pub
+        return str(request.base_url).rstrip("/")
+
+    @app.post("/api/auth/email/start")
+    async def email_start(request: Request):
+        data = await _json(request)
+        try:
+            email = parse_email(str(data.get("email") or ""))
+        except EmailError as e:
+            raise HTTPException(400, str(e))
+        try:
+            channel = normalize_email_channel(data.get("channel"))
+        except EmailError as e:
+            raise HTTPException(400, str(e))
+        if s.production and getattr(svc.mail_provider, "name", "") == "console":
+            raise HTTPException(503, "email_unconfigured")
+        ip = client_ip(request)
+        subj = email_subject(svc.log_salt, email)
+        if not limiter.allow(f"auth:email:addr:{subj}", 3, 15 * 60):
+            raise HTTPException(429, "rate limit")
+        if not limiter.allow(f"auth:email:ip:{ip}", 10, 3600):
+            raise HTTPException(429, "rate limit")
+        uid = getattr(request.state, "user", None)
+        try:
+            return await svc.start_email(
+                email, channel, ip=ip,
+                user_id=(uid.id if uid and uid.authenticated else None),
+                origin=_email_origin(request),
+            )
+        except AuthError as e:
+            raise _err(e)
+
+    @app.post("/api/auth/email/verify")
+    async def email_verify(request: Request):
+        data = await _json(request)
+        try:
+            email = parse_email(str(data.get("email") or ""))
+        except EmailError as e:
+            raise HTTPException(400, str(e))
+        ip = client_ip(request)
+        if not limiter.allow(f"auth:email:verify:{ip}", 20, 3600):
+            raise HTTPException(429, "rate limit")
+        try:
+            out = await svc.verify_email(
+                email, str(data.get("code") or ""), ip=ip,
+                user_agent=request.headers.get("user-agent"),
+            )
+        except AuthError as e:
+            raise _err(e)
+        return attach_session_response(request, out)
+
+    @app.post("/api/auth/email/consume")
+    async def email_consume_post(request: Request):
+        data = await _json(request)
+        ip = client_ip(request)
+        if not limiter.allow(f"auth:email:consume:{ip}", 20, 3600):
+            raise HTTPException(429, "rate limit")
+        try:
+            out = await svc.consume_email_token(
+                str(data.get("token") or ""), ip=ip,
+                user_agent=request.headers.get("user-agent"),
+            )
+        except AuthError as e:
+            raise _err(e)
+        return attach_session_response(request, out)
+
+    @app.get("/api/auth/email/consume")
+    async def email_consume_get(request: Request):
+        token = (request.query_params.get("token") or "").strip()
+        ip = client_ip(request)
+        if not limiter.allow(f"auth:email:consume:{ip}", 20, 3600):
+            raise HTTPException(429, "rate limit")
+        try:
+            out = await svc.consume_email_token(
+                token, ip=ip, user_agent=request.headers.get("user-agent"),
+            )
+        except AuthError as e:
+            raise _err(e)
+        sess = out.pop("session")
+        refresh = out.pop("refresh")
+        resp = RedirectResponse("/", status_code=303)
+        set_session_cookies(resp, request, svc.access_token(sess), refresh)
+        return resp
+
+    @app.post("/api/auth/email/link")
+    async def email_link(request: Request):
+        user = require_user(request)
+        if user.auth_mode == "local":
+            raise HTTPException(400, "accounts_only")
+        data = await _json(request)
+        email_raw = str(data.get("email") or "").strip()
+        email = None
+        if email_raw:
+            try:
+                email = parse_email(email_raw)
+            except EmailError as e:
+                raise HTTPException(400, str(e))
+        try:
+            return await svc.link_email(
+                user.user, user.session,
+                email=email,
+                code=str(data.get("code") or "") or None,
+                token=str(data.get("token") or "") or None,
+                ip=client_ip(request),
+            )
+        except AuthError as e:
+            raise _err(e)
+
+
+    @app.get("/api/auth/providers")
+    async def auth_providers():
+        return {
+            "providers": {
+                "anonymous": False,
+                "phone": True,
+                "apple": svc.apple_enabled(),
+                "google": False,
+                "email": True,
+                "passkey": False,
+            }
+        }
+
+    @app.api_route("/api/auth/apple/start", methods=["GET", "POST"])
+    async def apple_start(request: Request):
+        if (s.auth_mode or "local").strip().lower() != "accounts":
+            raise HTTPException(400, "accounts_only")
+        ip = client_ip(request)
+        if not limiter.allow(f"auth:apple:ip:{ip}", 10, 3600):
+            raise HTTPException(429, "rate limit")
+        intent = "signin"
+        if request.method == "POST":
+            data = await _json(request)
+            intent = str(data.get("intent") or request.query_params.get("intent") or "signin")
+        else:
+            intent = str(request.query_params.get("intent") or "signin")
+        uid = None
+        if intent == "link":
+            if request.method != "POST":
+                raise HTTPException(405, "link_requires_post")
+            user = require_user(request)
+            if user.auth_mode == "local":
+                raise HTTPException(400, "accounts_only")
+            uid = user.id
+        try:
+            out = await svc.start_apple(intent=intent, user_id=uid, ip=ip)
+        except AuthError as e:
+            raise _err(e)
+        if _wants_json(request):
+            return {"ok": True, "url": out["url"], "intent": out["intent"]}
+        return RedirectResponse(out["url"], status_code=302)
+
+    @app.api_route("/api/auth/apple/callback", methods=["GET", "POST"])
+    async def apple_callback(request: Request):
+        if (s.auth_mode or "local").strip().lower() != "accounts":
+            raise HTTPException(400, "accounts_only")
+        form = await _apple_callback_payload(request)
+        if form.get("error"):
+            return _apple_fail(request, AuthError(401, str(form.get("error") or "apple_denied")))
+        ip = client_ip(request)
+        if not limiter.allow(f"auth:apple:cb:{ip}", 30, 3600):
+            raise HTTPException(429, "rate limit")
+        user = getattr(request.state, "user", None)
+        current = user.user if user and user.authenticated and user.auth_mode == "accounts" else None
+        session = user.session if user and user.authenticated else None
+        try:
+            out = await svc.complete_apple(
+                code=str(form.get("code") or ""),
+                state=str(form.get("state") or ""),
+                user_form=form.get("user"),
+                current_user=current,
+                session=session,
+                ip=ip,
+                user_agent=request.headers.get("user-agent"),
+            )
+        except AuthError as e:
+            return _apple_fail(request, e)
+        if out.get("link"):
+            if _wants_json(request):
+                return out
+            return RedirectResponse(_apple_return_url(request, "linked"), status_code=303)
+        if _wants_json(request):
+            return attach_session_response(request, out)
+        dest = _apple_return_url(request, "ok")
+        resp = RedirectResponse(dest, status_code=303)
+        set_session_cookies(resp, request, svc.access_token(out["session"]), out["refresh"])
+        return resp
+
+    @app.post("/api/auth/apple/notifications")
+    async def apple_notifications(request: Request):
+        ip = client_ip(request)
+        if not limiter.allow(f"auth:apple:note:{ip}", 60, 3600):
+            raise HTTPException(429, "rate limit")
+        token = await _apple_notification_jwt(request)
+        try:
+            out = await svc.handle_apple_notification(token)
+        except AuthError as e:
+            raise _err(e)
+        for uid in out.get("close_users") or []:
+            await app.state.auth_sockets.close_user(uid)
+        return {"ok": True, "handled": out.get("handled", 0)}
+
 
 async def _json(request: Request) -> dict:
     if not (request.headers.get("content-type") or "").startswith("application/json"):
@@ -329,5 +598,58 @@ async def _json(request: Request) -> dict:
     if not isinstance(data, dict):
         raise HTTPException(400, "invalid JSON")
     return data
+
+
+def _wants_json(request: Request) -> bool:
+    accept = (request.headers.get("accept") or "").lower()
+    if "application/json" in accept:
+        return True
+    return request.query_params.get("format") == "json"
+
+
+def _apple_return_url(request: Request, status: str, error: str | None = None) -> str:
+    origin = (request.app.state.settings.public_origin or "").strip().rstrip("/")
+    params = {"auth": status}
+    if error:
+        params["auth_error"] = error
+    qs = urlencode(params)
+    if origin:
+        return f"{origin}/?{qs}"
+    return f"/?{qs}"
+
+
+def _apple_fail(request: Request, exc: AuthError):
+    if _wants_json(request):
+        return JSONResponse({"detail": exc.code}, status_code=exc.status)
+    return RedirectResponse(_apple_return_url(request, "error", exc.code), status_code=303)
+
+
+async def _apple_callback_payload(request: Request) -> dict:
+    if request.method == "GET":
+        return {k: v for k, v in request.query_params.items()}
+    ct = (request.headers.get("content-type") or "").lower()
+    if "application/json" in ct:
+        return await _json(request)
+    try:
+        form = await request.form()
+    except Exception:
+        return {}
+    return {str(k): form.get(k) for k in form.keys()}
+
+
+async def _apple_notification_jwt(request: Request) -> str:
+    ct = (request.headers.get("content-type") or "").lower()
+    if "application/json" in ct:
+        data = await _json(request)
+        return str(data.get("payload") or data.get("signedPayload") or "")
+    try:
+        form = await request.form()
+        token = form.get("payload") or form.get("signedPayload")
+        if token:
+            return str(token)
+    except Exception:
+        pass
+    raw = (await request.body()).decode("utf-8", errors="ignore").strip()
+    return raw.strip('"')
 
 

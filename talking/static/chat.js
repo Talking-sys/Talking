@@ -38,6 +38,7 @@
       originalHide: "Скрыть оригинал",
       unread: "непрочитанные",
       trFailed: "оригинал (перевод недоступен)",
+      account: "Аккаунт",
     },
     en: {
       targetLang: "Note translation language",
@@ -72,6 +73,7 @@
       originalHide: "Hide original",
       unread: "unread",
       trFailed: "original (translation unavailable)",
+      account: "Account",
     },
   };
 

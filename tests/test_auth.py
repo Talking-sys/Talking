@@ -10,6 +10,7 @@ ACCOUNTS = {
     "LOG_SALT": "test-log-salt-not-a-real-salt",
     "PUBLIC_ORIGIN": "https://testserver",
     "SMS_PROVIDER": "console",
+    "MAIL_PROVIDER": "console",
     "DB_ENCRYPTION_KEY": "test-db-encryption-key-not-secret",
     "APP_ENV": "test",
 }
@@ -83,6 +84,9 @@ def _production_accounts_env(monkeypatch, tmp_path, **extra):
     monkeypatch.setenv("LOG_SALT", "s" * 32)
     monkeypatch.setenv("DATABASE_URL", "postgresql://talking:talking@localhost:5432/talking")
     monkeypatch.setenv("APP_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("MAIL_PROVIDER", "smtp")
+    monkeypatch.setenv("SMTP_HOST", "smtp.example.invalid")
+    monkeypatch.setenv("SMTP_FROM", "noreply@example.invalid")
     for key, value in extra.items():
         if value is None:
             monkeypatch.delenv(key, raising=False)
@@ -126,11 +130,45 @@ def test_production_accepts_twilio_verify(monkeypatch, tmp_path):
         TWILIO_VERIFY_SERVICE_SID="VAtest",
     )
     from talking.auth.http import validate_auth_settings
+    from talking.auth.mail import build_mail_provider
     from talking.auth.providers import build_phone_provider
     from talking.config import Settings
     settings = Settings()
     validate_auth_settings(settings)
     assert build_phone_provider(settings).name == "twilio"
+    assert build_mail_provider(settings).name == "smtp"
+
+
+def test_production_refuses_console_mail_provider(monkeypatch, tmp_path):
+    _production_accounts_env(
+        monkeypatch, tmp_path,
+        SMS_PROVIDER="twilio",
+        TWILIO_ACCOUNT_SID="ACtest",
+        TWILIO_AUTH_TOKEN="token",
+        TWILIO_VERIFY_SERVICE_SID="VAtest",
+        MAIL_PROVIDER="console",
+    )
+    from talking.config import Settings
+    from talking.server import create_app
+    with pytest.raises(RuntimeError, match="MAIL_PROVIDER"):
+        create_app(Settings())
+
+
+def test_production_refuses_smtp_without_host(monkeypatch, tmp_path):
+    _production_accounts_env(
+        monkeypatch, tmp_path,
+        SMS_PROVIDER="twilio",
+        TWILIO_ACCOUNT_SID="ACtest",
+        TWILIO_AUTH_TOKEN="token",
+        TWILIO_VERIFY_SERVICE_SID="VAtest",
+        MAIL_PROVIDER="smtp",
+        SMTP_HOST=None,
+        SMTP_FROM="noreply@example.invalid",
+    )
+    from talking.config import Settings
+    from talking.server import create_app
+    with pytest.raises(RuntimeError, match="SMTP"):
+        create_app(Settings())
 
 
 def test_twilio_incomplete_does_not_fallback_to_console(monkeypatch, tmp_path):
@@ -263,3 +301,72 @@ def test_local_mode_still_issues_ws_token(make_client):
     assert me.json()["id"] == "local"
     assert me.json()["auth_mode"] == "local"
     assert me.json()["anonymous"] is False
+
+
+def test_auth_config_is_public_and_has_no_secrets(make_client):
+    c = _client(make_client)
+    r = c.get("/api/auth/config")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["auth_mode"] == "accounts"
+    assert body["methods"]["phone"] is True
+    assert body["methods"]["anonymous"] is False
+    assert body["methods"]["recovery"] is True
+    assert body["methods"]["google"] is False
+    assert body["methods"]["apple"] is False
+    assert body["methods"]["email"] is False
+    assert body["methods"]["passkey"] is False
+    blob = r.text.lower()
+    assert "twilio" not in blob
+    assert "token" not in blob
+    assert "secret" not in blob
+    assert "sid" not in blob
+
+
+def test_auth_config_placeholder_flags(make_client):
+    c = _client(
+        make_client,
+        AUTH_GOOGLE="1", AUTH_APPLE="1", AUTH_EMAIL="1", AUTH_PASSKEY="1",
+        SMS_COUNTRY_ALLOWLIST="US,DE", SMS_DEFAULT_REGION="DE",
+    )
+    body = c.get("/api/auth/config").json()
+    assert body["methods"]["google"] is True
+    assert body["methods"]["apple"] is True
+    assert body["methods"]["email"] is True
+    assert body["methods"]["passkey"] is True
+    assert body["default_region"] == "DE"
+    assert body["country_allowlist"] == ["US", "DE"]
+
+
+def test_auth_pages_and_methods_enabled(make_client):
+    c = _client(make_client)
+    signin = c.get("/signin")
+    assert signin.status_code == 200
+    assert 'id="phoneNational"' in signin.text
+    assert 'id="btnAnonymous"' not in signin.text
+    assert 'id="btnCallMe"' in signin.text
+    account = c.get("/account")
+    assert account.status_code == 200
+    assert 'id="sessionList"' in account.text
+    assert 'id="methodList"' in account.text
+    r = _session(c)
+    methods = c.get("/api/auth/methods")
+    assert methods.status_code == 200
+    body = methods.json()
+    assert "methods" in body
+    assert body["enabled"]["phone"] is True
+    assert body["enabled"]["anonymous"] is False
+    assert body["enabled"]["google"] is False
+    assert r.status_code == 200
+
+
+def test_signin_page_in_local_mode(make_client):
+    c = make_client()
+    r = c.get("/signin")
+    assert r.status_code == 200
+    assert 'data-page="signin"' in r.text
+    cfg = c.get("/api/auth/config").json()
+    assert cfg["auth_mode"] == "local"
+    assert c.get("/account").status_code == 200
+    assert 'href="/account"' in c.get("/").text
+    assert "Микрофон" in c.get("/").text

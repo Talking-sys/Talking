@@ -18,6 +18,8 @@ log = logging.getLogger("talking.auth")
 CSRF_EXEMPT_PREFIXES = (
     "/api/sdk/",
     "/api/commercial/webhook",
+    "/api/auth/apple/callback",
+    "/api/auth/apple/notifications",
     "/healthz",
     "/readyz",
     "/static",
