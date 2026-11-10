@@ -10,7 +10,7 @@ from talking.chat.groups import GroupError, GroupStore
 from talking.chat.models import Message, redact_for_admin
 from talking.translate import StubProvider, Translator
 
-from tests.test_auth import ACCOUNTS, _anon, _h
+from tests.test_auth import ACCOUNTS, _h, _session
 
 
 def _accounts(make_client, **extra):
@@ -22,11 +22,12 @@ def _accounts(make_client, **extra):
 def _users(make_client, n=2, **extra):
     root = _accounts(make_client, **extra)
     out = []
-    for _ in range(n):
+    regions = ("US", "GB", "CA", "DE", "FR")
+    for i in range(n):
         c = TestClient(root.app_, base_url="https://testserver")
         c.eng = root.eng
         c.app_ = root.app_
-        r = _anon(c)
+        r = _session(c, region=regions[i % len(regions)])
         out.append((c, r.json()["csrf_token"], r.json()["user"]["id"]))
     return out
 

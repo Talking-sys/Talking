@@ -1,7 +1,9 @@
-"""HTTP + WebSocket endpoints for the notes slice.
+"""HTTP + WebSocket endpoints for notes + M4 1:1 chat.
 
-Designed so M4 can keep these paths and add nicks beside them. Groups (M6):
+Designed for the M4 direct-chat and M6 group extensions.
   GET  /api/chat
+  GET/PATCH /api/chat/me
+  GET  /api/chat/users
   GET/POST /api/chat/dialogs
   GET/POST /api/chat/dialogs/{id}/messages
   POST /api/chat/upload
@@ -24,14 +26,14 @@ import uuid
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 
-from talking.auth import authenticate_websocket
-from talking.auth.deps import require_user
 from talking.commercial.client import ENTITLEMENT_VOICE_TRANSCRIPTION
 from talking.ids import check_id
+from talking.identity import handshake_websocket, request_user_id
 from talking.languages import WHISPER_LANGUAGES
 from talking.security import TokenBucket, client_ip
 
 from . import PARTIAL
+from .directory import ChatDirectory, NickError, REPORT_REASONS
 from .events import ensure_hub
 from .group_routes import register_group_routes
 from .groups import GroupError
@@ -49,19 +51,24 @@ from .media import (
     check_media_id, parse_waveform, validate_duration_ms, validate_kind,
 )
 from .models import MESSAGE_TYPES, NOTE_TYPES, Message, transcript_view
+from .nicks import SEARCH_LIMIT
 from .notes import attach_transcript
 from .store import ChatStore
 from .transcribe import TranscriptionService
+from .translate_msg import src_lang_for
+from .views import dialog_public, shape_message, viewer_context
 
 log = logging.getLogger(__name__)
 TEXT_MAX = 500
 
 
-def _http(err: MediaError | ValueError | KeyError | GroupError | PermissionError) -> HTTPException:
+def _http(
+    err: MediaError | ValueError | KeyError | GroupError | PermissionError | NickError
+) -> HTTPException:
     if isinstance(err, MediaError):
         return HTTPException(err.status, str(err))
-    if isinstance(err, GroupError):
-        return HTTPException(err.status, err.message)
+    if isinstance(err, (GroupError, NickError)):
+        return HTTPException(err.status, getattr(err, "message", str(err)))
     if isinstance(err, PermissionError):
         return HTTPException(403, str(err) or "forbidden")
     if isinstance(err, KeyError):
@@ -70,11 +77,57 @@ def _http(err: MediaError | ValueError | KeyError | GroupError | PermissionError
 
 
 def _user_id(request: Request) -> str:
-    return require_user(request).id
+    return request_user_id(request)
 
 
-def _public_message(app: FastAPI, user_id: str, msg: Message) -> dict:
-    return public_message(app, user_id, msg)
+def _resolve_peer(directory: ChatDirectory, data: dict) -> str:
+    if data.get("user_id"):
+        return check_id(str(data["user_id"]), "user_id")
+    if data.get("nickname"):
+        found = directory.find_nick(str(data["nickname"]))
+        if found is None:
+            raise NickError("user not found", status=404)
+        return found[0]
+    raise NickError("user_id or nickname required")
+
+
+def _play_url(app: FastAPI, msg: Message) -> str | None:
+    if not msg.media_id:
+        return None
+    owner = msg.sender_id
+    tok = app.state.chat_tokens.mint(
+        msg.media_id, owner, one_time=False, ttl=app.state.settings.chat_play_token_ttl,
+    )
+    return f"/api/chat/media/{msg.media_id}?token={tok}"
+
+
+def _public_message(app: FastAPI, user_id: str, msg: Message, *, translate: bool = True) -> dict:
+    store: ChatStore = app.state.chat_store
+    if store.is_group(msg.dialog_id):
+        return public_message(app, user_id, msg)
+    play = _play_url(app, msg)
+    directory: ChatDirectory | None = getattr(app.state, "chat_directory", None)
+    if directory is None or not translate:
+        return msg.to_public(play_url=play, viewer_id=user_id)
+    auto, tgt, _peer = viewer_context(store, directory, user_id, msg.dialog_id)
+    sender_native = directory.get_profile(msg.sender_id).native_lang
+    cache = getattr(app.state, "chat_translations", None)
+    translator = getattr(getattr(app.state, "engine", None), "translator", None)
+
+    def _persist(updated: Message) -> None:
+        store.update_message(user_id, updated)
+
+    return shape_message(
+        msg,
+        viewer_id=user_id,
+        play_url=play,
+        auto=auto,
+        tgt=tgt,
+        src=src_lang_for(msg, sender_native),
+        translator=translator,
+        cache=cache,
+        persist=_persist if translator is not None else None,
+    )
 
 
 async def _read_limited(upload: UploadFile, limit: int) -> bytes:
@@ -95,6 +148,11 @@ def register_chat(app: FastAPI) -> None:
     s = app.state.settings
     data = app.state.engine.s.data_dir
     app.state.chat_store = ChatStore(f"{data}/chat")
+    app.state.chat_directory = ChatDirectory(
+        f"{data}/chat",
+        secret=app.state.secret,
+        rename_seconds=int(getattr(s, "chat_nick_rename_seconds", 0) or 0),
+    )
     app.state.chat_media = MediaLibrary(
         f"{data}/chat",
         quota_bytes=s.chat_quota_bytes,
@@ -108,6 +166,8 @@ def register_chat(app: FastAPI) -> None:
     app.state.chat_transcribe_limiter = TokenBucket(
         s.chat_transcribe_per_min, burst=s.chat_transcribe_per_min,
     )
+    app.state.chat_search_limiter = TokenBucket(30, burst=30)
+    app.state.chat_report_limiter = TokenBucket(5, burst=5)
 
     def _limit_msg(uid: str) -> None:
         if not app.state.chat_msg_limiter.allow(uid):
@@ -118,9 +178,52 @@ def register_chat(app: FastAPI) -> None:
             raise HTTPException(429, "rate limit: too many uploads")
 
     def _public_for(uid: str, msg: Message) -> dict:
-        return public_message(app, uid, msg)
+        return _public_message(app, uid, msg)
 
     register_group_routes(app)
+
+    def _guard_direct(uid: str, dialog_id: str) -> None:
+        store: ChatStore = app.state.chat_store
+        directory: ChatDirectory = app.state.chat_directory
+        if not store.is_direct(dialog_id):
+            return
+        peer = store.peer_id(uid, dialog_id)
+        if peer and directory.is_blocked_pair(uid, peer):
+            raise HTTPException(403, "blocked")
+
+    def _fanout_message(msg: Message) -> None:
+        store: ChatStore = app.state.chat_store
+        hub: ChatHub = app.state.chat_hub
+        if store.is_group(msg.dialog_id):
+            publish_message(app, msg, actor_id=msg.sender_id)
+            return
+        try:
+            parts = store.participants(msg.sender_id, msg.dialog_id)
+        except (KeyError, ValueError):
+            parts = [msg.sender_id]
+        for part in parts:
+            public = _public_message(app, part, msg)
+            hub.publish(part, {"type": "chat.message", "dialog_id": msg.dialog_id, "message": public})
+        peer = next((p for p in parts if p != msg.sender_id), None)
+        if peer and hub.online(peer):
+            store.mark_delivered(peer, msg.dialog_id, msg.id)
+            store.apply_peer_receipt(msg.sender_id, msg.dialog_id, read=False)
+            hub.publish(msg.sender_id, {
+                "type": "chat.receipt", "dialog_id": msg.dialog_id,
+                "status": "delivered", "user_id": peer, "last_id": msg.id,
+            })
+
+    def _fanout_deleted(uid: str, dialog_id: str, message_id: str) -> None:
+        store: ChatStore = app.state.chat_store
+        hub: ChatHub = app.state.chat_hub
+        if store.is_group(dialog_id):
+            publish_deleted(app, dialog_id, message_id, actor_id=uid)
+            return
+        try:
+            parts = store.participants(uid, dialog_id)
+        except (KeyError, ValueError):
+            parts = [uid]
+        hub.publish_users(parts, {"type": "chat.deleted", "dialog_id": dialog_id, "message_id": message_id})
 
     app.state.transcription = TranscriptionService(
         engine=app.state.engine,
@@ -192,8 +295,9 @@ def register_chat(app: FastAPI) -> None:
             "status": "partial",
             "partial": list(PARTIAL),
             "feature": "notes",
-            "message": "Telegram-style voice_note / video_note. Full chat is ROADMAP M4.",
-            "roadmap_m4": "Unique nicks, prefix search, block, 3-minute auto-delete extend this store.",
+            "core": True,
+            "message": "Notes, M4 1:1 chat, and M6 groups.",
+            "roadmap_m4": "Nicks, receipts, translation, and groups extend this store.",
             "types": list(MESSAGE_TYPES),
             "limits": {
                 "text_chars": TEXT_MAX,
@@ -209,28 +313,131 @@ def register_chat(app: FastAPI) -> None:
             "transcription": _transcription_public(uid),
         }
 
+    @app.get("/api/chat/me")
+    def chat_me(request: Request):
+        uid = _user_id(request)
+        return app.state.chat_directory.get_profile(uid).to_public()
+
+    @app.patch("/api/chat/me")
+    async def patch_chat_me(request: Request):
+        uid = _user_id(request)
+        try:
+            data = await request.json()
+        except json.JSONDecodeError:
+            raise HTTPException(400, "invalid JSON")
+        if not isinstance(data, dict):
+            raise HTTPException(400, "invalid JSON")
+        nick = data["nickname"] if "nickname" in data else None
+        native = data.get("native_lang") if "native_lang" in data else None
+        if native is not None and native != "" and native not in WHISPER_LANGUAGES:
+            raise HTTPException(400, "unknown native_lang")
+        auto = data.get("auto_translate") if "auto_translate" in data else None
+        try:
+            prof = app.state.chat_directory.set_profile(
+                uid, nickname=nick, native_lang=native, auto_translate=auto,
+            )
+        except NickError as e:
+            raise _http(e)
+        return prof.to_public()
+
+    @app.get("/api/chat/users")
+    def search_users(request: Request, q: str = ""):
+        uid = _user_id(request)
+        if not app.state.chat_search_limiter.allow(uid):
+            raise HTTPException(429, "rate limit")
+        try:
+            return {"ok": True, "users": app.state.chat_directory.search_prefix(q, viewer_id=uid, limit=SEARCH_LIMIT)}
+        except NickError as e:
+            raise _http(e)
+
     @app.get("/api/chat/dialogs")
     def list_dialogs(request: Request):
         uid = _user_id(request)
-        return [d.to_public() for d in app.state.chat_store.list_dialogs(uid)]
+        directory: ChatDirectory = app.state.chat_directory
+        store: ChatStore = app.state.chat_store
+        profile = directory.get_profile(uid)
+        return [dialog_public(store, directory, uid, d, profile=profile) for d in store.list_dialogs(uid)]
 
     @app.post("/api/chat/dialogs")
     async def create_dialog(request: Request):
         uid = _user_id(request)
         _limit_msg(uid)
         data = await request.json() if request.headers.get("content-type", "").startswith("application/json") else {}
-        title = str((data or {}).get("title") or "Чат")
-        return app.state.chat_store.create_dialog(uid, title).to_public()
+        data = data or {}
+        directory: ChatDirectory = app.state.chat_directory
+        store: ChatStore = app.state.chat_store
+        try:
+            if data.get("invite"):
+                from_id = directory.consume_invite(str(data["invite"]), uid)
+                if directory.is_blocked_pair(uid, from_id):
+                    raise HTTPException(403, "blocked")
+                d = store.open_direct(uid, from_id)
+            elif data.get("nickname") or data.get("user_id"):
+                if data.get("user_id"):
+                    peer_id = check_id(str(data["user_id"]), "user_id")
+                else:
+                    found = directory.find_nick(str(data["nickname"]))
+                    if found is None:
+                        raise HTTPException(404, "user not found")
+                    peer_id = found[0]
+                if directory.is_blocked_pair(uid, peer_id):
+                    raise HTTPException(403, "blocked")
+                d = store.open_direct(uid, peer_id)
+            else:
+                title = str(data.get("title") or "Чат")
+                d = store.create_dialog(uid, title)
+        except (NickError, ValueError, KeyError) as e:
+            raise _http(e)
+        return dialog_public(store, directory, uid, d)
+
+    @app.patch("/api/chat/dialogs/{dialog_id}")
+    async def patch_dialog(request: Request, dialog_id: str):
+        uid = _user_id(request)
+        try:
+            data = await request.json()
+        except json.JSONDecodeError:
+            raise HTTPException(400, "invalid JSON")
+        if not isinstance(data, dict):
+            raise HTTPException(400, "invalid JSON")
+        fields = {}
+        if "auto_translate" in data:
+            fields["auto_translate"] = bool(data["auto_translate"])
+        if "target_lang" in data:
+            tgt = data["target_lang"]
+            if tgt in ("", None):
+                fields["target_lang"] = None
+            elif tgt not in WHISPER_LANGUAGES:
+                raise HTTPException(400, "unknown target_lang")
+            else:
+                fields["target_lang"] = tgt
+        try:
+            d = app.state.chat_store.set_dialog_pref(uid, dialog_id, **fields)
+        except (ValueError, KeyError) as e:
+            raise _http(e)
+        return dialog_public(app.state.chat_store, app.state.chat_directory, uid, d)
 
     @app.get("/api/chat/dialogs/{dialog_id}/messages")
-    def list_messages(request: Request, dialog_id: str, limit: int = 100):
+    def list_messages(
+        request: Request, dialog_id: str, limit: int = 100,
+        before: str = "", after: str = "", after_ts: float = 0,
+    ):
         uid = _user_id(request)
         _purge_retention(uid)
         try:
-            msgs = app.state.chat_store.list_messages(uid, dialog_id, limit=min(max(limit, 1), 500))
+            msgs = app.state.chat_store.list_messages(
+                uid, dialog_id,
+                limit=min(max(limit, 1), 500),
+                before=before or None,
+                after=after or None,
+                after_ts=after_ts or None,
+            )
         except (ValueError, KeyError) as e:
             raise _http(e)
-        return [_public_message(app, uid, m) for m in msgs]
+        body = [_public_message(app, uid, m) for m in msgs]
+        has_more = False
+        if msgs:
+            has_more = app.state.chat_store.has_more_before(uid, dialog_id, msgs[0].id)
+        return JSONResponse(body, headers={"X-Chat-Has-More": "1" if has_more else "0"})
 
     @app.post("/api/chat/upload")
     async def upload_media(
@@ -333,6 +540,7 @@ def register_chat(app: FastAPI) -> None:
         _limit_upload(uid, client_ip(request))
         try:
             app.state.chat_store.get_dialog(uid, dialog_id)
+            _guard_direct(uid, dialog_id)
             kind = validate_kind(kind)
             dur = validate_duration_ms(duration_ms, s.chat_note_max_ms)
             peaks = parse_waveform(waveform) if waveform else None
@@ -347,7 +555,7 @@ def register_chat(app: FastAPI) -> None:
         except (MediaError, ValueError, KeyError) as e:
             raise _http(e)
         public = _public_message(app, uid, msg)
-        publish_message(app, msg, actor_id=uid)
+        _fanout_message(msg)
         return JSONResponse(public, status_code=201)
 
     @app.post("/api/chat/dialogs/{dialog_id}/messages")
@@ -365,6 +573,7 @@ def register_chat(app: FastAPI) -> None:
             raise HTTPException(400, "type must be text, voice_note or video_note")
         try:
             app.state.chat_store.get_dialog(uid, dialog_id)
+            _guard_direct(uid, dialog_id)
         except (ValueError, KeyError) as e:
             raise _http(e)
         tgt = data.get("target_lang") or None
@@ -392,22 +601,35 @@ def register_chat(app: FastAPI) -> None:
                     app.state.engine.store.get("target_lang") or "en",
                 )
                 fill_translations(app, msg, src_lang=src, members=group.members if group else [])
-            elif tgt:
-                src = str(data.get("src_lang") or "en")
-                try:
-                    tr = app.state.engine.translator.translate(text, src, tgt)
+            else:
+                src = str(data.get("src_lang") or "") or None
+                if not src:
+                    src = app.state.chat_directory.get_profile(uid).native_lang or "en"
+                if src in WHISPER_LANGUAGES:
                     msg.src_lang = src
+            if tgt and not app.state.chat_store.is_group(dialog_id):
+                try:
+                    tr = app.state.engine.translator.translate(text, src or "en", tgt, always=True)
+                    msg.src_lang = src or "en"
                     msg.tgt_lang = tgt
                     msg.transcript = text
                     msg.translation = tr.text
                     msg.translation_provider = tr.provider
                     msg.transcript_status = "ok"
+                    msg.translations = {
+                        tgt: {"text": tr.text, "src": src or "en", "tgt": tgt,
+                              "provider": tr.provider, "failed": False},
+                    }
                 except Exception as e:  # noqa: BLE001
                     msg.transcript_status = "error"
                     msg.transcript_reason = str(e)[:200]
+                    msg.translations = {
+                        tgt: {"text": text, "src": src or "en", "tgt": tgt, "failed": True,
+                              "reason": str(e)[:200]},
+                    }
             app.state.chat_store.add_message(uid, msg)
             public = _public_message(app, uid, msg)
-            publish_message(app, msg, actor_id=uid)
+            _fanout_message(msg)
             return JSONResponse(public, status_code=201)
 
         # voice_note / video_note from a previously uploaded media_id
@@ -424,7 +646,7 @@ def register_chat(app: FastAPI) -> None:
         except (MediaError, ValueError, KeyError) as e:
             raise _http(e)
         public = _public_message(app, uid, msg)
-        publish_message(app, msg, actor_id=uid)
+        _fanout_message(msg)
         return JSONResponse(public, status_code=201)
 
     @app.post("/api/chat/messages/{message_id}/transcribe")
@@ -493,30 +715,230 @@ def register_chat(app: FastAPI) -> None:
             actor = group.member(uid) if group else None
             if actor is None or actor.role not in ("owner", "admin"):
                 raise HTTPException(403, "not the author")
+        if app.state.chat_store.is_direct(msg.dialog_id) and msg.sender_id != uid:
+            raise HTTPException(403, "not the author")
         removed = app.state.chat_store.delete_message(uid, msg.dialog_id, msg.id)
         if removed and removed.media_id:
             app.state.chat_media.delete(removed.sender_id or uid, removed.media_id)
-        publish_deleted(app, msg.dialog_id, message_id, actor_id=uid)
+        _fanout_deleted(uid, msg.dialog_id, message_id)
         return {"ok": True, "id": message_id}
+
+    @app.post("/api/chat/dialogs/{dialog_id}/read")
+    async def mark_read(request: Request, dialog_id: str):
+        uid = _user_id(request)
+        try:
+            data = await request.json() if request.headers.get("content-type", "").startswith("application/json") else {}
+        except json.JSONDecodeError:
+            data = {}
+        last_id = str((data or {}).get("last_id") or "") or None
+        try:
+            app.state.chat_store.get_dialog(uid, dialog_id)
+            rec = app.state.chat_store.mark_read(uid, dialog_id, last_id)
+            peer = app.state.chat_store.peer_id(uid, dialog_id)
+        except (ValueError, KeyError) as e:
+            raise _http(e)
+        if peer:
+            app.state.chat_store.apply_peer_receipt(peer, dialog_id, read=True)
+            app.state.chat_hub.publish(peer, {
+                "type": "chat.receipt", "dialog_id": dialog_id,
+                "status": "read", "user_id": uid, "last_id": last_id,
+            })
+        return {"ok": True, "receipt": rec}
+
+    @app.get("/api/chat/sync")
+    def chat_sync(request: Request, after: float = 0):
+        uid = _user_id(request)
+        after = float(after or 0)
+        store: ChatStore = app.state.chat_store
+        msgs = [_public_message(app, uid, m) for m in store.messages_since(uid, after)]
+        return {
+            "ok": True,
+            "server_time": time.time(),
+            "after": after,
+            "messages": msgs,
+            "deleted": store.list_tombstones(uid, after_ts=after),
+        }
+
+    @app.post("/api/chat/invites")
+    def create_invite(request: Request):
+        uid = _user_id(request)
+        ttl = int(getattr(s, "chat_invite_ttl_seconds", 7 * 24 * 3600) or 7 * 24 * 3600)
+        return app.state.chat_directory.create_invite(uid, ttl=ttl)
+
+    @app.get("/api/chat/invites/{token}")
+    def peek_invite(request: Request, token: str):
+        _user_id(request)
+        try:
+            return app.state.chat_directory.peek_invite(token)
+        except NickError as e:
+            raise _http(e)
+
+    @app.post("/api/chat/invites/{token}/accept")
+    def accept_invite(request: Request, token: str):
+        uid = _user_id(request)
+        directory: ChatDirectory = app.state.chat_directory
+        try:
+            from_id = directory.consume_invite(token, uid)
+            if directory.is_blocked_pair(uid, from_id):
+                raise HTTPException(403, "blocked")
+            d = app.state.chat_store.open_direct(uid, from_id)
+        except (NickError, ValueError, KeyError) as e:
+            raise _http(e)
+        return dialog_public(app.state.chat_store, directory, uid, d)
+
+    @app.get("/api/chat/blocks")
+    def list_blocks(request: Request):
+        uid = _user_id(request)
+        return {"ok": True, "blocks": app.state.chat_directory.list_blocks(uid)}
+
+    @app.post("/api/chat/blocks")
+    async def block_user(request: Request):
+        uid = _user_id(request)
+        try:
+            data = await request.json()
+        except json.JSONDecodeError:
+            raise HTTPException(400, "invalid JSON")
+        if not isinstance(data, dict):
+            raise HTTPException(400, "invalid JSON")
+        directory: ChatDirectory = app.state.chat_directory
+        try:
+            peer_id = _resolve_peer(directory, data)
+            directory.block(uid, peer_id)
+        except (NickError, ValueError) as e:
+            raise _http(e)
+        return {"ok": True, "user": directory.public_peer(peer_id)}
+
+    @app.delete("/api/chat/blocks/{peer_id}")
+    def unblock_user(request: Request, peer_id: str):
+        uid = _user_id(request)
+        try:
+            peer_id = check_id(peer_id, "user_id")
+            app.state.chat_directory.unblock(uid, peer_id)
+        except (NickError, ValueError) as e:
+            raise _http(e)
+        return {"ok": True, "id": peer_id}
+
+    @app.post("/api/chat/reports")
+    async def report_user(request: Request):
+        uid = _user_id(request)
+        if not app.state.chat_report_limiter.allow(uid):
+            raise HTTPException(429, "rate limit")
+        try:
+            data = await request.json()
+        except json.JSONDecodeError:
+            raise HTTPException(400, "invalid JSON")
+        if not isinstance(data, dict):
+            raise HTTPException(400, "invalid JSON")
+        directory: ChatDirectory = app.state.chat_directory
+        try:
+            peer_id = _resolve_peer(directory, data)
+            reason = str(data.get("reason") or "other")
+            if reason not in REPORT_REASONS:
+                raise HTTPException(400, "reason must be spam, abuse, or other")
+            # Drop any client-supplied message body — reports never store contents.
+            out = directory.report(uid, peer_id, reason)
+        except (NickError, ValueError) as e:
+            raise _http(e)
+        return out
+
+    def _on_connect_deliver(uid: str) -> None:
+        store: ChatStore = app.state.chat_store
+        hub: ChatHub = app.state.chat_hub
+        for d in store.list_dialogs(uid):
+            if d.kind != "direct" or not d.last_message_id:
+                continue
+            store.mark_delivered(uid, d.id)
+            peer = store.peer_id(uid, d.id)
+            if peer:
+                store.apply_peer_receipt(peer, d.id, read=False)
+                hub.publish(peer, {
+                    "type": "chat.receipt", "dialog_id": d.id,
+                    "status": "delivered", "user_id": uid,
+                })
+
+    async def _ws_event(ws: WebSocket, uid: str, data: dict) -> None:
+        kind = data.get("type")
+        store: ChatStore = app.state.chat_store
+        hub: ChatHub = app.state.chat_hub
+        directory: ChatDirectory = app.state.chat_directory
+        if kind == "ping":
+            await ws.send_text(json.dumps({"type": "pong", "t": data.get("t")}))
+            return
+        if kind == "chat.typing":
+            dialog_id = str(data.get("dialog_id") or "")
+            try:
+                peer = store.peer_id(uid, dialog_id)
+            except (KeyError, ValueError):
+                return
+            if not peer or directory.is_blocked_pair(uid, peer):
+                return
+            hub.publish(peer, {
+                "type": "chat.typing", "dialog_id": dialog_id,
+                "user_id": uid, "on": bool(data.get("on", True)),
+            })
+            return
+        if kind == "chat.read":
+            dialog_id = str(data.get("dialog_id") or "")
+            last_id = str(data.get("last_id") or "") or None
+            try:
+                store.get_dialog(uid, dialog_id)
+                store.mark_read(uid, dialog_id, last_id)
+                peer = store.peer_id(uid, dialog_id)
+            except (KeyError, ValueError):
+                return
+            if peer:
+                store.apply_peer_receipt(peer, dialog_id, read=True)
+                hub.publish(peer, {
+                    "type": "chat.receipt", "dialog_id": dialog_id,
+                    "status": "read", "user_id": uid, "last_id": last_id,
+                })
+            return
+        if kind == "chat.sync":
+            after = float(data.get("after") or 0)
+            msgs = [_public_message(app, uid, m) for m in store.messages_since(uid, after)]
+            await ws.send_text(json.dumps({
+                "type": "chat.sync", "server_time": time.time(), "after": after,
+                "messages": msgs, "deleted": store.list_tombstones(uid, after_ts=after),
+            }, ensure_ascii=False))
+            return
+        if kind == "chat.send":
+            dialog_id = str(data.get("dialog_id") or "")
+            text = str(data.get("text") or "").strip()
+            if not text or len(text) > TEXT_MAX:
+                await ws.send_text(json.dumps({"type": "chat.error", "error": "invalid text"}))
+                return
+            try:
+                store.get_dialog(uid, dialog_id)
+                _guard_direct(uid, dialog_id)
+            except (KeyError, ValueError, HTTPException):
+                await ws.send_text(json.dumps({"type": "chat.error", "error": "forbidden"}))
+                return
+            if not app.state.chat_msg_limiter.allow(uid):
+                await ws.send_text(json.dumps({"type": "chat.error", "error": "rate limit"}))
+                return
+            src = directory.get_profile(uid).native_lang or "en"
+            msg = Message(
+                id="m" + uuid.uuid4().hex[:15],
+                dialog_id=dialog_id, sender_id=uid, type="text",
+                created_at=time.time(), text=text, src_lang=src,
+            )
+            if store.is_group(dialog_id):
+                group = store.groups.get(dialog_id)
+                src = viewer_lang(store, uid, dialog_id, src)
+                fill_translations(app, msg, src_lang=src, members=group.members if group else [])
+            store.add_message(uid, msg)
+            _fanout_message(msg)
+            return
 
     @app.websocket("/ws/chat")
     async def ws_chat(ws: WebSocket, t: str = ""):
-        ctx = await authenticate_websocket(ws, t)
-        if ctx is None or not ctx.authenticated:
-            await ws.close(code=1008, reason="handshake")
-            return
-        uid = ctx.id
-        try:
-            uid = check_id(uid)
-        except ValueError:
-            await ws.close(code=1008, reason="handshake")
+        uid = await handshake_websocket(ws, t)
+        if uid is None:
             return
         await ws.accept()
-        app.state.auth_sockets.add(ws, uid, ctx.session_id)
         q: asyncio.Queue = asyncio.Queue(maxsize=200)
         hub: ChatHub = app.state.chat_hub
         hub.subscribe(uid, q)
-        hub.subscribe("*", q)
 
         def _event_visible(ev: dict) -> bool:
             if not isinstance(ev, dict):
@@ -545,8 +967,12 @@ def register_chat(app: FastAPI) -> None:
                 await ws.send_text(json.dumps(ev, ensure_ascii=False))
 
         send_task = asyncio.create_task(sender())
-        await ws.send_text(json.dumps({"type": "chat.hello", "user_id": uid, "module": "chat"}))
+        await ws.send_text(json.dumps({
+            "type": "chat.hello", "user_id": uid, "module": "chat",
+            "server_time": time.time(),
+        }))
         try:
+            _on_connect_deliver(uid)
             while True:
                 msg = await ws.receive()
                 if msg.get("type") == "websocket.disconnect":
@@ -558,12 +984,11 @@ def register_chat(app: FastAPI) -> None:
                     data = json.loads(txt)
                 except json.JSONDecodeError:
                     continue
-                if isinstance(data, dict) and data.get("type") == "ping":
-                    await ws.send_text(json.dumps({"type": "pong", "t": data.get("t")}))
+                if isinstance(data, dict):
+                    await _ws_event(ws, uid, data)
         except WebSocketDisconnect:
             pass
         finally:
             app.state.auth_sockets.discard(ws)
             hub.unsubscribe(uid, q)
-            hub.unsubscribe("*", q)
             send_task.cancel()

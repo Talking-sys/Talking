@@ -1,4 +1,4 @@
-"""Dialog + message records for the notes slice.
+"""Dialog + message records for the notes slice and M4 1:1 chat.
 
 One message model for notes, link previews, edits, and transcription.
 Canonical discriminator is ``kind``; ``type`` is an alias. Canonical
@@ -7,7 +7,7 @@ conversation key is ``dialog_id``; ``conversation_id`` is the alias used by
 """
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 from typing import Any
 
 from .edits import public_edit_fields
@@ -17,6 +17,7 @@ NOTE_TYPES = ("voice_note", "video_note")
 _ALIAS_KEYS = (
     "play_url", "kind", "type", "conversation_id", "dialog_id", "edited",
     "original", "translation_status", "translation_reason",
+    "unread_count", "peer", "last_message",
 )
 
 
@@ -26,17 +27,71 @@ class Dialog:
     title: str
     created_at: float
     updated_at: float
-    kind: str = "direct"
+    kind: str = "local"
+    participants: list[str] = field(default_factory=list)
+    last_message_id: str | None = None
+    last_sender_id: str | None = None
+    last_preview: str = ""
+    last_type: str | None = None
+    prefs: dict[str, Any] = field(default_factory=dict)
     avatar: str | None = None
     description: str | None = None
     member_count: int | None = None
     role: str | None = None
 
-    def to_public(self) -> dict[str, Any]:
-        d = asdict(self)
-        if d.get("kind") not in ("group", "direct"):
-            d["kind"] = "direct"
+    def to_public(
+        self, *, viewer_id: str | None = None, extra: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
+        d = {
+            "id": self.id,
+            "title": self.title,
+            "created_at": self.created_at,
+            "updated_at": self.updated_at,
+            "kind": self.kind if self.kind in ("local", "direct", "group") else "local",
+        }
+        if self.kind == "direct":
+            d["participants"] = list(self.participants)
+        if self.avatar is not None:
+            d["avatar"] = self.avatar
+        if self.description is not None:
+            d["description"] = self.description
+        if self.member_count is not None:
+            d["member_count"] = self.member_count
+        if self.role is not None:
+            d["role"] = self.role
+        if extra:
+            d.update(extra)
+        if viewer_id and self.kind == "direct":
+            d.setdefault("peer_id", next((p for p in self.participants if p != viewer_id), None))
         return d
+
+    def to_storage(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "title": self.title,
+            "created_at": self.created_at,
+            "updated_at": self.updated_at,
+            "kind": self.kind,
+            "participants": list(self.participants),
+            "last_message_id": self.last_message_id,
+            "last_sender_id": self.last_sender_id,
+            "last_preview": self.last_preview,
+            "last_type": self.last_type,
+            "prefs": dict(self.prefs or {}),
+            "avatar": self.avatar,
+            "description": self.description,
+            "member_count": self.member_count,
+            "role": self.role,
+        }
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> "Dialog":
+        known = {f.name for f in cls.__dataclass_fields__.values()}  # type: ignore[attr-defined]
+        kw = {k: v for k, v in d.items() if k in known}
+        kw.setdefault("kind", "local")
+        kw.setdefault("participants", list(d.get("participants") or []))
+        kw.setdefault("prefs", dict(d.get("prefs") or {}))
+        return cls(**kw)
 
 
 @dataclass
@@ -70,9 +125,12 @@ class Message:
     # Server-only: persist in JSONL, never in to_public() / to_dict().
     original_text: str | None = None
     revisions: list[dict] = field(default_factory=list)
-    # Per-language translations for groups. JSONL only; to_public() overlays one lang.
-    translations: dict[str, dict] = field(default_factory=dict)
     extra: dict[str, Any] = field(default_factory=dict)
+    # Per-language translations and delivery receipts are persisted on the row.
+    translations: dict[str, Any] = field(default_factory=dict)
+    delivered_at: float | None = None
+    read_at: float | None = None
+    deleted_at: float | None = None
 
     @property
     def kind(self) -> str:
@@ -90,7 +148,7 @@ class Message:
     def conversation_id(self, value: str) -> None:
         self.dialog_id = value or self.dialog_id
 
-    def to_public(self, play_url: str | None = None) -> dict[str, Any]:
+    def to_public(self, play_url: str | None = None, *, viewer_id: str | None = None) -> dict[str, Any]:
         d = {
             "id": self.id,
             "dialog_id": self.dialog_id,
@@ -122,6 +180,17 @@ class Message:
         d.update(public_edit_fields(self))
         if play_url:
             d["play_url"] = play_url
+        if self.delivered_at:
+            d["delivered_at"] = self.delivered_at
+        if self.read_at:
+            d["read_at"] = self.read_at
+        if viewer_id and viewer_id == self.sender_id:
+            if self.read_at:
+                d["receipt"] = "read"
+            elif self.delivered_at:
+                d["receipt"] = "delivered"
+            else:
+                d["receipt"] = "sent"
         return d
 
     def overlay_for_lang(self, lang: str | None, play_url: str | None = None) -> dict[str, Any]:
@@ -153,9 +222,13 @@ class Message:
         """JSONL row: public fields plus private edit history, no play_url."""
         d = self.to_public()
         d.pop("play_url", None)
+        d.pop("receipt", None)
         d["original_text"] = self.original_text
         d["revisions"] = list(self.revisions or [])
         d["translations"] = dict(self.translations or {})
+        d["delivered_at"] = self.delivered_at
+        d["read_at"] = self.read_at
+        d["deleted_at"] = self.deleted_at
         return d
 
     def to_admin(self) -> dict[str, Any]:
@@ -173,6 +246,7 @@ class Message:
         kw = {k: v for k, v in data.items() if k in known}
         extra = {k: v for k, v in data.items() if k not in known and k not in _ALIAS_KEYS}
         kw.setdefault("extra", extra)
+        kw.setdefault("translations", dict(data.get("translations") or extra.pop("translations", {}) or {}))
         return cls(**kw)
 
 
@@ -212,3 +286,14 @@ def transcript_view(msg: Message) -> dict[str, Any]:
         "duration": msg.transcript_duration,
         "reason": msg.transcript_reason,
     }
+
+
+def preview_text(msg: Message, *, limit: int = 80) -> str:
+    if msg.type == "voice_note":
+        return "Voice note"
+    if msg.type == "video_note":
+        return "Video note"
+    body = (msg.text or "").replace("\n", " ").strip()
+    if len(body) <= limit:
+        return body
+    return body[: limit - 1] + "…"

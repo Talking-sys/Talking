@@ -44,6 +44,19 @@
       promptGroup: "Название группы",
       joined: "Вы в группе",
       inviteCopied: "Ссылка приглашения",
+      chats: "Чаты",
+      findUser: "Найти по нику",
+      start: "Начать",
+      autoTr: "Перевод",
+      block: "Заблокировать",
+      report: "Пожаловаться",
+      deleteMsg: "Удалить последнее",
+      typing: "печатает…",
+      original: "Оригинал",
+      originalHide: "Скрыть оригинал",
+      unread: "непрочитанные",
+      trFailed: "оригинал (перевод недоступен)",
+      account: "Аккаунт",
     },
     en: {
       targetLang: "Note translation language",
@@ -84,6 +97,19 @@
       promptGroup: "Group name",
       joined: "You joined the group",
       inviteCopied: "Invite link",
+      chats: "Chats",
+      findUser: "Find by nickname",
+      start: "Start",
+      autoTr: "Translate",
+      block: "Block",
+      report: "Report",
+      deleteMsg: "Delete last",
+      typing: "typing…",
+      original: "Original",
+      originalHide: "Hide original",
+      unread: "unread",
+      trFailed: "original (translation unavailable)",
+      account: "Account",
     },
   };
 
@@ -113,8 +139,25 @@
     pollers: {},
     dialogs: [],
     group: null,
-    me: "local",
+    csrf: "",
+    me: null,
+    lastTs: 0,
+    typingTimer: 0,
+    oldestId: null,
+    loadingOlder: false,
   };
+
+  async function api(path, opts) {
+    const o = opts || {};
+    const headers = Object.assign({}, o.headers || {});
+    if (o.body && typeof o.body === "string" && !headers["Content-Type"]) {
+      headers["Content-Type"] = "application/json";
+    }
+    if (state.csrf) headers["X-CSRF-Token"] = state.csrf;
+    const r = await fetch(path, Object.assign({}, o, { headers }));
+    const body = await r.json().catch(() => ({}));
+    return { r, body };
+  }
 
   function t(key) {
     const pack = I18N[state.uiLang] || I18N.ru;
@@ -646,8 +689,9 @@
     return tools;
   }
 
-  function upsertMessage(msg) {
+  function upsertMessage(msg, opts) {
     if (!msg || !msg.id) return;
+    const silent = opts && opts.silent;
     $("empty").hidden = true;
     let row = document.getElementById("m-" + msg.id);
     if (!row) {
@@ -674,12 +718,24 @@
     }
     const kindLabel = msg.type === "video_note" ? t("circle") : msg.type === "voice_note" ? t("voice") : t("text");
     const hasTr = !!(msg.translation && msg.transcript && msg.translation !== msg.transcript);
+    const receipt = msg.receipt === "read" ? " ✓✓" : msg.receipt === "delivered" ? " ✓" : "";
+    const myId = state.me && state.me.user_id;
+    const failed = msg.translation_failed || msg.translation_status === "fallback";
+    row.classList.toggle("peer", !!(msg.sender_id && myId && msg.sender_id !== myId));
+    row.classList.toggle("failed-tr", !!failed);
     row.innerHTML = '<div class="meta"><span>' + clock + "</span><span>" + kindLabel +
-      "</span></div>" + media + noteToolsHtml(msg);
+      '<span class="receipt">' + receipt + "</span></span></div>" + media + noteToolsHtml(msg);
     if (msg.type === "text") {
       const bodyEl = row.querySelector(".body");
-      bodyEl.textContent = msg.translation || msg.text || "";
-      if (msg.translation && msg.text && msg.translation !== msg.text) {
+      bodyEl.textContent = failed ? (msg.text || "") : (msg.translation || msg.text || "");
+      const originalText = msg.original || msg.text;
+      if (failed) {
+        const mark = document.createElement("button");
+        mark.type = "button";
+        mark.className = "show-orig";
+        mark.textContent = t("trFailed");
+        row.appendChild(mark);
+      } else if (msg.translation && originalText && msg.translation !== originalText) {
         const origBtn = document.createElement("button");
         origBtn.type = "button";
         origBtn.className = "show-orig";
@@ -687,7 +743,7 @@
         const orig = document.createElement("p");
         orig.className = "orig-text orig-wrap";
         orig.hidden = true;
-        orig.textContent = msg.text;
+        orig.textContent = originalText;
         origBtn.addEventListener("click", () => {
           orig.hidden = !orig.hidden;
           origBtn.textContent = orig.hidden ? t("showOrig") : t("hideOrig");
@@ -734,7 +790,7 @@
         fg.style.strokeDashoffset = String(RING_C * (1 - p));
       });
     }
-    row.scrollIntoView({ block: "end" });
+    if (!silent) row.scrollIntoView({ block: "end" });
   }
 
   async function sendText(ev) {
@@ -745,14 +801,13 @@
     $("sendText").hidden = true;
     $("recordBtn").hidden = false;
     try {
-      const r = await fetch("/api/chat/dialogs/" + encodeURIComponent(state.dialogId) + "/messages", {
+      const { r, body } = await api("/api/chat/dialogs/" + encodeURIComponent(state.dialogId) + "/messages", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ type: "text", text, target_lang: state.target, src_lang: state.target }),
+        body: JSON.stringify({ type: "text", text, target_lang: state.target, src_lang: state.me && state.me.native_lang || "ru" }),
       });
-      const body = await r.json().catch(() => ({}));
       if (!r.ok) { toast(body.detail || ("Ошибка " + r.status)); return; }
       upsertMessage(body);
+      state.lastTs = Math.max(state.lastTs, body.created_at || 0);
     } catch (e) {
       toast("Сеть: " + e.message);
     }
@@ -767,13 +822,33 @@
     ws.onmessage = (e) => {
       try {
         const ev = JSON.parse(e.data);
-        const msgDialog = ev.message && (ev.message.dialog_id || ev.message.conversation_id);
-        if (ev.type === "chat.message" && ev.message && (!msgDialog || msgDialog === state.dialogId)) {
-          upsertMessage(ev.message);
+        if (ev.type === "chat.hello") {
+          ws.send(JSON.stringify({ type: "chat.sync", after: state.lastTs || 0 }));
         }
-        if (ev.type === "chat.group" || ev.type === "chat.group.member") loadDialogs();
-        if ((ev.type === "chat.group.left" || ev.type === "chat.group.kicked" || ev.type === "chat.group.dissolved")
-            && ev.group_id === state.dialogId) {
+        if (ev.type === "chat.sync") {
+          (ev.messages || []).filter((msg) => msg.dialog_id === state.dialogId
+            || msg.conversation_id === state.dialogId).forEach(upsertMessage);
+          (ev.deleted || []).filter((d) => d.dialog_id === state.dialogId).forEach((d) => {
+            const row = document.getElementById("m-" + d.id);
+            if (row) row.remove();
+          });
+        }
+        if (ev.type === "chat.message" && ev.message) {
+          const msgDialog = ev.dialog_id || ev.message.dialog_id || ev.message.conversation_id;
+          if (msgDialog && msgDialog !== state.dialogId) {
+            loadDialogs();
+          } else {
+            upsertMessage(ev.message);
+            state.lastTs = Math.max(state.lastTs, ev.message.created_at || 0);
+            api("/api/chat/dialogs/" + encodeURIComponent(state.dialogId) + "/read", {
+              method: "POST",
+              body: JSON.stringify({ last_id: ev.message.id }),
+            }).catch(() => {});
+          }
+        }
+        if (ev.type === "chat.group" || ev.type === "chat.group.member"
+            || ev.type === "chat.group.left" || ev.type === "chat.group.kicked"
+            || ev.type === "chat.group.dissolved") {
           loadDialogs();
         }
         if (ev.type === "chat.transcript" && ev.message_id) {
@@ -787,6 +862,22 @@
         if (ev.type === "chat.deleted" && ev.message_id) {
           const row = document.getElementById("m-" + ev.message_id);
           if (row) row.remove();
+        }
+        if (ev.type === "chat.typing" && ev.dialog_id === state.dialogId) {
+          const el = $("typing");
+          if (!el) return;
+          el.hidden = !ev.on;
+          el.textContent = ev.on ? t("typing") : "";
+          clearTimeout(state.typingTimer);
+          if (ev.on) state.typingTimer = setTimeout(() => { el.hidden = true; }, 4000);
+        }
+        if (ev.type === "chat.receipt" && ev.dialog_id === state.dialogId) {
+          document.querySelectorAll(".msg").forEach((row) => {
+            if (!row._msg || row._msg.sender_id !== (state.me && state.me.user_id)) return;
+            row._msg.receipt = ev.status;
+            const rec = row.querySelector(".receipt");
+            if (rec) rec.textContent = ev.status === "read" ? " ✓✓" : ev.status === "delivered" ? " ✓" : "";
+          });
         }
       } catch (_) { /* ignore */ }
     };
@@ -826,6 +917,7 @@
     const cur = currentDialog();
     if (cur && $("dialogTitle")) $("dialogTitle").textContent = cur.title || "Чат";
     fillDialogSelect();
+    renderDialogs();
   }
 
   async function loadMessages() {
@@ -833,7 +925,10 @@
     feed.querySelectorAll(".msg").forEach((el) => el.remove());
     $("empty").hidden = false;
     const msgs = await fetch("/api/chat/dialogs/" + encodeURIComponent(state.dialogId) + "/messages").then((r) => r.json());
-    (Array.isArray(msgs) ? msgs : []).forEach(upsertMessage);
+    const rows = Array.isArray(msgs) ? msgs : [];
+    rows.forEach(upsertMessage);
+    state.oldestId = rows[0] && rows[0].id;
+    if (rows.length) state.lastTs = rows[rows.length - 1].created_at || state.lastTs;
   }
 
   async function refreshGroup() {
@@ -862,8 +957,8 @@
       if (canKick) {
         btn.textContent = t("kick");
         btn.addEventListener("click", async () => {
-          const out = await fetch("/api/chat/groups/" + encodeURIComponent(state.dialogId) + "/members/" + encodeURIComponent(m.user_id), { method: "DELETE" });
-          if (!out.ok) { toast("Ошибка " + out.status); return; }
+          const { r } = await api("/api/chat/groups/" + encodeURIComponent(state.dialogId) + "/members/" + encodeURIComponent(m.user_id), { method: "DELETE" });
+          if (!r.ok) { toast("Ошибка " + r.status); return; }
           refreshGroup();
         });
       } else {
@@ -875,7 +970,11 @@
 
   async function switchDialog(id) {
     state.dialogId = id;
+    state.lastTs = 0;
+    state.oldestId = null;
+    localStorage.setItem("chat_dialog", id);
     fillDialogSelect();
+    renderDialogs();
     const cur = currentDialog();
     if (cur && $("dialogTitle")) $("dialogTitle").textContent = cur.title || "Чат";
     await loadMessages();
@@ -887,14 +986,14 @@
   }
 
   async function boot() {
-    const [langs, dialogs, settings, chat, me] = await Promise.all([
+    const [langs, dialogs, settings, chat, auth, me] = await Promise.all([
       fetch("/api/languages").then((r) => r.json()),
       fetch("/api/chat/dialogs").then((r) => r.json()),
       fetch("/api/settings").then((r) => r.json()),
       fetch("/api/chat").then((r) => r.json()).catch(() => ({})),
-      fetch("/api/auth/me").then((r) => r.ok ? r.json() : { id: "local" }).catch(() => ({ id: "local" })),
+      fetch("/api/auth/me").then((r) => r.json()).catch(() => ({})),
+      fetch("/api/chat/me").then((r) => r.json()).catch(() => ({})),
     ]);
-    state.me = (me && me.id) || "local";
     state.dialogs = Array.isArray(dialogs) ? dialogs : [];
     state.uiLang = localStorage.getItem("ui_lang") || document.documentElement.lang || "ru";
     if (state.uiLang !== "en") state.uiLang = "ru";
@@ -923,35 +1022,48 @@
     });
     state.target = localStorage.getItem("target_lang") || settings.target_lang || "en";
     sel.value = state.target;
-    if (state.dialogs[0]) {
-      state.dialogId = state.dialogs[0].id;
-      $("dialogTitle").textContent = state.dialogs[0].title || "Чат";
+    state.me = me;
+    state.csrf = auth && auth.csrf_token || "";
+    if (profile.nickname && $("myNick")) $("myNick").value = profile.nickname;
+    if (typeof profile.auto_translate === "boolean" && $("autoTranslate")) {
+      $("autoTranslate").checked = profile.auto_translate;
     }
-    fillDialogSelect();
+    const saved = localStorage.getItem("chat_dialog") || "";
+    const picked = state.dialogs.find((d) => d.id === saved) || state.dialogs[0];
+    if (picked) {
+      state.dialogId = picked.id;
+      $("dialogTitle").textContent = picked.title || "Чат";
+    }
     const invite = new URLSearchParams(location.search).get("invite");
     if (invite) {
-      const joined = await fetch("/api/chat/groups/join", {
+      const { r, body } = await api("/api/chat/groups/join", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ token: invite, lang: state.target }),
       });
-      if (joined.ok) {
-        const g = await joined.json();
+      if (r.ok) {
         toast(t("joined"));
         await loadDialogs();
-        if (g.id) await switchDialog(g.id);
+        if (body.id) state.dialogId = body.id;
         history.replaceState({}, "", "/chat");
       }
     }
+    renderDialogs();
+    bindCoreUi();
+    fillDialogSelect();
     await loadMessages();
     sel.addEventListener("change", async () => {
       state.target = sel.value;
       localStorage.setItem("target_lang", state.target);
       if (isGroupDialog()) {
-        await fetch("/api/chat/groups/" + encodeURIComponent(state.dialogId) + "/members/" + encodeURIComponent(state.me), {
+        await api("/api/chat/groups/" + encodeURIComponent(state.dialogId) + "/members/"
+          + encodeURIComponent(state.me.user_id), {
           method: "PATCH",
-          headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ lang: state.target }),
+        });
+      } else {
+        await api("/api/chat/dialogs/" + encodeURIComponent(state.dialogId), {
+          method: "PATCH",
+          body: JSON.stringify({ target_lang: state.target }),
         });
       }
     });
@@ -959,12 +1071,9 @@
     $("newGroupBtn").addEventListener("click", async () => {
       const name = window.prompt(t("promptGroup"));
       if (!name) return;
-      const r = await fetch("/api/chat/groups", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name, lang: state.target }),
+      const { r, body } = await api("/api/chat/groups", {
+        method: "POST", body: JSON.stringify({ name, lang: state.target }),
       });
-      const body = await r.json().catch(() => ({}));
       if (!r.ok) { toast(body.detail || ("Ошибка " + r.status)); return; }
       await loadDialogs();
       await switchDialog(body.id);
@@ -978,9 +1087,8 @@
     $("groupPanelClose").addEventListener("click", () => { $("groupPanel").hidden = true; });
     $("groupMetaForm").addEventListener("submit", async (ev) => {
       ev.preventDefault();
-      const r = await fetch("/api/chat/groups/" + encodeURIComponent(state.dialogId), {
+      const { r } = await api("/api/chat/groups/" + encodeURIComponent(state.dialogId), {
         method: "PATCH",
-        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           name: $("groupName").value,
           avatar: $("groupAvatar").value,
@@ -995,23 +1103,17 @@
       ev.preventDefault();
       const userId = $("addMemberId").value.trim();
       if (!userId) return;
-      const r = await fetch("/api/chat/groups/" + encodeURIComponent(state.dialogId) + "/members", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ user_id: userId, lang: state.target }),
+      const { r, body } = await api("/api/chat/groups/" + encodeURIComponent(state.dialogId) + "/members", {
+        method: "POST", body: JSON.stringify({ user_id: userId, lang: state.target }),
       });
-      const body = await r.json().catch(() => ({}));
       if (!r.ok) { toast(body.detail || ("Ошибка " + r.status)); return; }
       $("addMemberId").value = "";
       await refreshGroup();
     });
     $("inviteBtn").addEventListener("click", async () => {
-      const r = await fetch("/api/chat/groups/" + encodeURIComponent(state.dialogId) + "/invites", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ expires_in: 7 * 24 * 3600, max_uses: 20 }),
+      const { r, body } = await api("/api/chat/groups/" + encodeURIComponent(state.dialogId) + "/invites", {
+        method: "POST", body: JSON.stringify({ expires_in: 7 * 24 * 3600, max_uses: 20 }),
       });
-      const body = await r.json().catch(() => ({}));
       if (!r.ok) { toast(body.detail || ("Ошибка " + r.status)); return; }
       const url = location.origin + (body.url || ("/chat?invite=" + body.token));
       $("inviteOut").hidden = false;
@@ -1019,7 +1121,7 @@
       if (navigator.clipboard) navigator.clipboard.writeText(url).catch(() => {});
     });
     $("leaveBtn").addEventListener("click", async () => {
-      const r = await fetch("/api/chat/groups/" + encodeURIComponent(state.dialogId) + "/leave", { method: "POST" });
+      const { r } = await api("/api/chat/groups/" + encodeURIComponent(state.dialogId) + "/leave", { method: "POST" });
       if (!r.ok) { toast("Ошибка " + r.status); return; }
       $("groupPanel").hidden = true;
       await loadDialogs();
@@ -1031,14 +1133,187 @@
       $("recordBtn").hidden = has;
       $("composer").style.height = "auto";
       $("composer").style.height = Math.min(120, $("composer").scrollHeight) + "px";
+      if (state.ws && state.ws.readyState === 1) {
+        state.ws.send(JSON.stringify({ type: "chat.typing", dialog_id: state.dialogId, on: has }));
+      }
     });
     $("composerForm").addEventListener("submit", sendText);
     $("composer").addEventListener("keydown", (e) => {
       if (e.key === "Enter" && !e.shiftKey) sendText(e);
     });
+    $("feed").addEventListener("scroll", () => {
+      if ($("feed").scrollTop < 24) loadOlder();
+    });
     bindRecord();
     setModeUI(state.fsm.mode);
     await connect();
+  }
+
+  function renderDialogs() {
+    const ul = $("dialogList");
+    if (!ul) return;
+    ul.innerHTML = "";
+    (state.dialogs || []).forEach((d) => {
+      const li = document.createElement("li");
+      if (d.id === state.dialogId) li.className = "is-active";
+      const title = (d.peer && d.peer.nickname) || d.title || d.id;
+      const preview = (d.last_message && d.last_message.text) || "";
+      li.innerHTML = "<strong></strong>" +
+        (d.unread_count ? '<span class="unread-badge"></span>' : "") +
+        '<span class="preview"></span>';
+      li.querySelector("strong").textContent = title;
+      if (d.unread_count) li.querySelector(".unread-badge").textContent = String(d.unread_count);
+      li.querySelector(".preview").textContent = preview;
+      li.addEventListener("click", () => openDialog(d.id));
+      ul.appendChild(li);
+    });
+  }
+
+  async function refreshDialogs() {
+    await loadDialogs();
+  }
+
+  async function openDialog(id) {
+    state.dialogId = id;
+    state.lastTs = 0;
+    state.oldestId = null;
+    localStorage.setItem("chat_dialog", id);
+    fillDialogSelect();
+    const d = (state.dialogs || []).find((x) => x.id === id);
+    $("dialogTitle").textContent = (d && ((d.peer && d.peer.nickname) || d.title)) || "Чат";
+    if ($("peerMenuBtn")) $("peerMenuBtn").hidden = !(d && d.kind === "direct");
+    if ($("dialogDrawer")) $("dialogDrawer").hidden = true;
+    if (isGroupDialog()) refreshGroup();
+    else if ($("groupPanel")) $("groupPanel").hidden = true;
+    $("feed").querySelectorAll(".msg").forEach((n) => n.remove());
+    $("empty").hidden = false;
+    const msgs = await fetch("/api/chat/dialogs/" + encodeURIComponent(id) + "/messages").then((r) => r.json());
+    msgs.forEach(upsertMessage);
+    state.oldestId = msgs[0] && msgs[0].id;
+    if (msgs.length) state.lastTs = msgs[msgs.length - 1].created_at || state.lastTs;
+    if (msgs.length) {
+      api("/api/chat/dialogs/" + encodeURIComponent(id) + "/read", {
+        method: "POST",
+        body: JSON.stringify({ last_id: msgs[msgs.length - 1].id }),
+      }).catch(() => {});
+    }
+    renderDialogs();
+  }
+
+  async function loadOlder() {
+    if (state.loadingOlder || !state.oldestId) return;
+    state.loadingOlder = true;
+    try {
+      const msgs = await fetch("/api/chat/dialogs/" + encodeURIComponent(state.dialogId) +
+        "/messages?limit=50&before=" + encodeURIComponent(state.oldestId)).then((r) => r.json());
+      if (Array.isArray(msgs) && msgs.length) {
+        const feed = $("feed");
+        const marker = feed.querySelector(".msg");
+        for (let i = msgs.length - 1; i >= 0; i--) {
+          upsertMessage(msgs[i], { silent: true });
+          const row = document.getElementById("m-" + msgs[i].id);
+          if (row && marker) feed.insertBefore(row, marker);
+        }
+        state.oldestId = msgs[0].id;
+      } else {
+        state.oldestId = null;
+      }
+    } finally {
+      state.loadingOlder = false;
+    }
+  }
+
+  function bindCoreUi() {
+    const drawer = $("dialogDrawer");
+    if ($("openDrawer")) $("openDrawer").addEventListener("click", () => { drawer.hidden = false; refreshDialogs(); });
+    if ($("closeDrawer")) $("closeDrawer").addEventListener("click", () => { drawer.hidden = true; });
+    if ($("nickForm")) $("nickForm").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const { r, body } = await api("/api/chat/me", {
+        method: "PATCH",
+        body: JSON.stringify({ nickname: $("myNick").value }),
+      });
+      if (!r.ok) { toast(body.detail || "nick"); return; }
+      state.me = body;
+      toast(body.nickname);
+    });
+    if ($("newChatForm")) $("newChatForm").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const q = ($("nickSearch").value || "").trim();
+      if (!q) return;
+      const payload = q.startsWith("http") || q.length > 20 && !q.match(/^[A-Za-z]/)
+        ? { invite: q.split("invite=").pop() }
+        : { nickname: q.replace(/^@/, "") };
+      const { r, body } = await api("/api/chat/dialogs", { method: "POST", body: JSON.stringify(payload) });
+      if (!r.ok) { toast(body.detail || "chat"); return; }
+      await refreshDialogs();
+      openDialog(body.id);
+    });
+    if ($("nickSearch")) $("nickSearch").addEventListener("input", async () => {
+      const q = $("nickSearch").value.trim();
+      const box = $("nickHits");
+      if (!q || q.length < 2) { box.hidden = true; return; }
+      const data = await fetch("/api/chat/users?q=" + encodeURIComponent(q)).then((r) => r.json());
+      box.innerHTML = "";
+      (data.users || []).forEach((u) => {
+        const li = document.createElement("li");
+        li.textContent = u.nickname;
+        li.addEventListener("click", async () => {
+          const { r, body } = await api("/api/chat/dialogs", {
+            method: "POST", body: JSON.stringify({ nickname: u.nickname }),
+          });
+          if (r.ok) { await refreshDialogs(); openDialog(body.id); }
+        });
+        box.appendChild(li);
+      });
+      box.hidden = !box.childElementCount;
+    });
+    if ($("makeInvite")) $("makeInvite").addEventListener("click", async () => {
+      const { r, body } = await api("/api/chat/invites", { method: "POST", body: "{}" });
+      if (!r.ok) { toast(body.detail || "invite"); return; }
+      const out = $("inviteOut");
+      out.hidden = false;
+      out.textContent = location.origin + body.url;
+    });
+    if ($("autoTranslate")) $("autoTranslate").addEventListener("change", async () => {
+      await api("/api/chat/me", {
+        method: "PATCH",
+        body: JSON.stringify({ auto_translate: $("autoTranslate").checked }),
+      });
+      await api("/api/chat/dialogs/" + encodeURIComponent(state.dialogId), {
+        method: "PATCH",
+        body: JSON.stringify({ auto_translate: $("autoTranslate").checked }),
+      });
+    });
+    if ($("peerMenuBtn")) $("peerMenuBtn").addEventListener("click", () => {
+      $("peerMenu").hidden = !$("peerMenu").hidden;
+    });
+    if ($("blockPeer")) $("blockPeer").addEventListener("click", async () => {
+      const d = (state.dialogs || []).find((x) => x.id === state.dialogId);
+      if (!d || !d.peer_id) return;
+      await api("/api/chat/blocks", { method: "POST", body: JSON.stringify({ user_id: d.peer_id }) });
+      $("peerMenu").hidden = true;
+      toast("OK");
+    });
+    if ($("reportPeer")) $("reportPeer").addEventListener("click", async () => {
+      const d = (state.dialogs || []).find((x) => x.id === state.dialogId);
+      if (!d || !d.peer_id) return;
+      await api("/api/chat/reports", { method: "POST", body: JSON.stringify({ user_id: d.peer_id, reason: "other" }) });
+      $("peerMenu").hidden = true;
+      toast("OK");
+    });
+    if ($("deleteLast")) $("deleteLast").addEventListener("click", async () => {
+      const rows = [...document.querySelectorAll(".msg")];
+      const last = rows[rows.length - 1];
+      if (!last || !last._msg) return;
+      await api("/api/chat/messages/" + encodeURIComponent(last._msg.id), { method: "DELETE" });
+      $("peerMenu").hidden = true;
+    });
+    const params = new URLSearchParams(location.search);
+    if (params.get("invite")) {
+      api("/api/chat/invites/" + encodeURIComponent(params.get("invite")) + "/accept", { method: "POST", body: "{}" })
+        .then(async ({ r, body }) => { if (r.ok) { await refreshDialogs(); openDialog(body.id); } });
+    }
   }
 
   boot().catch((e) => toast("Ошибка загрузки: " + e.message));

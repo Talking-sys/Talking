@@ -99,7 +99,7 @@ class Settings:
     redis_url: str = field(default_factory=lambda: _env("REDIS_URL", ""))
 
     # M10 auth. `local` is the single-user home Wi-Fi translator (tests/dev default).
-    # `accounts` enables cookies, CSRF, and phone/anonymous sign-in.
+    # `accounts` enables cookies, CSRF, phone/email, and Apple when configured. No anonymous users.
     auth_mode: str = field(default_factory=lambda: _env("AUTH_MODE", "local"))
     public_origin: str = field(default_factory=lambda: _env("PUBLIC_ORIGIN", ""))
     log_salt: str = field(default_factory=lambda: _env("LOG_SALT", ""))
@@ -111,6 +111,33 @@ class Settings:
     twilio_verify_service_sid: str = field(default_factory=lambda: _env("TWILIO_VERIFY_SERVICE_SID", ""))
     sms_country_allowlist: str = field(default_factory=lambda: _env("SMS_COUNTRY_ALLOWLIST", ""))
     sms_default_region: str = field(default_factory=lambda: _env("SMS_DEFAULT_REGION", ""))
+    # console = local/dev sink only (refused in production). smtp = generic SMTP.
+    mail_provider: str = field(default_factory=lambda: _env("MAIL_PROVIDER", "console"))
+    smtp_host: str = field(default_factory=lambda: _env("SMTP_HOST", ""))
+    smtp_port: int = field(default_factory=lambda: _env_int("SMTP_PORT", 587))
+    smtp_username: str = field(default_factory=lambda: _env("SMTP_USERNAME", ""))
+    smtp_password: str = field(default_factory=lambda: _env("SMTP_PASSWORD", ""))
+    smtp_from: str = field(default_factory=lambda: _env("SMTP_FROM", ""))
+    smtp_starttls: bool = field(default_factory=lambda: _env_bool("SMTP_STARTTLS", True))
+    smtp_ssl: bool = field(default_factory=lambda: _env_bool("SMTP_SSL", False))
+
+    # Sign in with Apple. Feature is off unless every required value is set.
+    # Private key stays in env or a file outside the repo — never commit .p8 / PEM.
+    apple_client_id: str = field(default_factory=lambda: _env("APPLE_CLIENT_ID", ""))
+    apple_team_id: str = field(default_factory=lambda: _env("APPLE_TEAM_ID", ""))
+    apple_key_id: str = field(default_factory=lambda: _env("APPLE_KEY_ID", ""))
+    apple_private_key: str = field(default_factory=lambda: _env("APPLE_PRIVATE_KEY", ""))
+    apple_private_key_file: str = field(default_factory=lambda: _env("APPLE_PRIVATE_KEY_FILE", ""))
+    apple_redirect_uri: str = field(default_factory=lambda: _env("APPLE_REDIRECT_URI", ""))
+    apple_authorize_url: str = field(default_factory=lambda: _env("APPLE_AUTHORIZE_URL", ""))
+    apple_token_url: str = field(default_factory=lambda: _env("APPLE_TOKEN_URL", ""))
+    apple_jwks_url: str = field(default_factory=lambda: _env("APPLE_JWKS_URL", ""))
+    # Sign-in UI placeholders. Google/passkey backends are later stages.
+    # AUTH_APPLE / AUTH_EMAIL only show the buttons; the APIs are already wired.
+    auth_google: bool = field(default_factory=lambda: _env_bool("AUTH_GOOGLE", False))
+    auth_apple: bool = field(default_factory=lambda: _env_bool("AUTH_APPLE", False))
+    auth_email: bool = field(default_factory=lambda: _env_bool("AUTH_EMAIL", False))
+    auth_passkey: bool = field(default_factory=lambda: _env_bool("AUTH_PASSKEY", False))
 
     s3_endpoint: str = field(default_factory=lambda: _env("S3_ENDPOINT", ""))
     s3_bucket: str = field(default_factory=lambda: _env("S3_BUCKET", ""))
@@ -166,6 +193,13 @@ class Settings:
     )
     chat_retention_seconds: int = field(
         default_factory=lambda: _env_int("CHAT_RETENTION_SECONDS", 0)
+    )
+    # M4 nick rename cooldown (owner spec: once per 30 days). Tests may set 0.
+    chat_nick_rename_seconds: int = field(
+        default_factory=lambda: _env_int("CHAT_NICK_RENAME_SECONDS", 30 * 24 * 3600)
+    )
+    chat_invite_ttl_seconds: int = field(
+        default_factory=lambda: _env_int("CHAT_INVITE_TTL_SECONDS", 7 * 24 * 3600)
     )
     # faster-whisper (default, local) | openai-compatible (off; audio would leave the server)
     chat_stt_provider: str = field(

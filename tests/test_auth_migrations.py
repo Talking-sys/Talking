@@ -59,6 +59,12 @@ def test_migrations_up_down():
                 "SELECT obj_description('auth_events'::regclass)"
             )
             assert comment and "90" in comment
+            cols = await conn.fetch(
+                "SELECT column_name FROM information_schema.columns "
+                "WHERE table_name='login_challenges'"
+            )
+            col_names = {r["column_name"] for r in cols}
+            assert "target_enc" in col_names
         finally:
             await conn.close()
 

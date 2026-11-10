@@ -63,8 +63,10 @@ Compose sets `DATABASE_URL` and `REDIS_URL`. The app still runs if those pings f
 | `AUTH_MODE` | `local` | `local` = single-user (dev/tests). `accounts` = cookies + CSRF. Refused in production if `local` |
 | `PUBLIC_ORIGIN` | empty | Canonical https origin; CORS credentials allowlist with `APP_CORS_ORIGINS` |
 | `LOG_SALT` | empty | HMAC salt for user ids in logs. Required in production |
-| `DB_ENCRYPTION_KEY` | empty | AES-GCM for phone (and later email) at rest |
+| `DB_ENCRYPTION_KEY` | empty | AES-GCM for phone and email at rest (hash-only if unset and no fallback secret) |
 | `SMS_PROVIDER` | `console` | `console` = local/dev sink only (refused in production). `twilio` = Verify SMS (voice is explicit fallback). See `docs/AUTH.md` |
+| `MAIL_PROVIDER` | `console` | `console` = local/dev sink only (refused in production). `smtp` = generic SMTP. See `docs/AUTH.md` |
+| `APPLE_CLIENT_ID` / `APPLE_TEAM_ID` / `APPLE_KEY_ID` / `APPLE_PRIVATE_KEY` or `APPLE_PRIVATE_KEY_FILE` / `APPLE_REDIRECT_URI` | empty | Sign in with Apple. Off unless every value is set. HTTPS redirect URI must match the Developer account exactly. Never commit the .p8. See `docs/AUTH.md` |
 | `S3_ENDPOINT` `S3_BUCKET` `S3_ACCESS_KEY` `S3_SECRET_KEY` `S3_REGION` | empty | R2/MinIO/AWS archive. Empty = local JSONL |
 | `COMMERCIAL_API_URL` / `COMMERCIAL_API_TOKEN` / `COMMERCIAL_WEBHOOK_SECRET` | empty | Proprietary service. Empty = stubs |
 | `COMMERCIAL_DEV_ENTITLEMENTS` / `COMMERCIAL_DEV_PREMIUM` | empty / off | Local premium stub (ignored in production) |

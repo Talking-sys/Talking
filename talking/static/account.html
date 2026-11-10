@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="theme-color" content="#0b1220">
+  <title>{{APP_NAME}} — аккаунт</title>
+  <link rel="icon" href="/static/logo.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/static/app.css">
+  <link rel="stylesheet" href="/static/auth.css">
+</head>
+<body class="auth-page" data-page="account">
+  <header class="top">
+    <a class="back" href="/" id="navBack" aria-label="Назад">←</a>
+    <img class="logo" src="/static/logo.svg" alt="">
+    <div class="brand">
+      <strong id="hdrTitle">Аккаунт</strong>
+      <small id="hdrSub">безопасность</small>
+    </div>
+    <div class="ui-lang" role="group" aria-label="Interface language">
+      <button type="button" id="uiLangRu" class="ui-lang-btn" aria-pressed="true" lang="ru">RU</button>
+      <button type="button" id="uiLangEn" class="ui-lang-btn" aria-pressed="false" lang="en">EN</button>
+    </div>
+  </header>
+
+  <main>
+    <p id="localBanner" class="auth-banner span-2" hidden></p>
+    <p id="errorBanner" class="auth-error span-2" hidden role="alert" data-testid="auth-error"></p>
+    <p id="okBanner" class="auth-ok span-2" hidden role="status"></p>
+
+    <div class="auth-grid" id="accountGrid">
+      <section class="card auth-card" id="sessionsCard">
+        <h1 id="sessionsTitle">Сессии и устройства</h1>
+        <p class="hint" id="sessionsHint">Выйдите с чужого устройства или со всех сразу.</p>
+        <div id="sessionList" class="list" data-testid="session-list"></div>
+        <button type="button" id="btnLogoutAll" class="btn btn-danger">Выйти везде</button>
+      </section>
+
+      <section class="card auth-card" id="methodsCard">
+        <h1 id="methodsTitle">Способы входа</h1>
+        <p class="hint" id="methodsHint">Последний способ удалить нельзя.</p>
+        <div id="methodList" class="list" data-testid="method-list"></div>
+        <button type="button" id="btnAddPhone" class="btn btn-primary">Добавить телефон</button>
+        <form id="linkPhoneForm" class="stack" hidden>
+          <div class="phone-row">
+            <label class="field">
+              <span id="lblCountry">Страна</span>
+              <select id="phoneCountry" aria-label="Страна"></select>
+            </label>
+            <label class="field">
+              <span id="lblPhone">Номер</span>
+              <input id="phoneNational" type="tel" inputmode="tel" autocomplete="tel-national" maxlength="20">
+            </label>
+          </div>
+          <button type="submit" id="btnSendCode" class="btn">Получить SMS-код</button>
+        </form>
+        <form id="linkCodeForm" class="stack" hidden>
+          <p class="hint" id="codeHint"></p>
+          <label class="field">
+            <span id="lblCode">Код из SMS</span>
+            <input id="codeInput" class="code-input" type="text" inputmode="numeric" autocomplete="one-time-code"
+                   maxlength="8">
+          </label>
+          <button type="submit" id="btnVerify" class="btn btn-primary">Привязать</button>
+          <div class="btn-row two">
+            <button type="button" id="btnResend" class="btn" disabled>Отправить ещё раз</button>
+            <button type="button" id="btnCallMe" class="btn btn-ghost">Позвоните мне</button>
+          </div>
+          <button type="button" id="btnCancelLink" class="btn btn-ghost">Отмена</button>
+        </form>
+      </section>
+    </div>
+  </main>
+
+  <div id="toast" class="toast" hidden></div>
+  <footer>
+    <a href="/" id="ftHome">Переводчик</a> ·
+    <a href="/chat" id="ftChat">Чат</a> ·
+    <a href="/translate" id="ftVoice">Голос</a> ·
+    <a href="/signin" id="ftSignin">Вход</a> ·
+    <a href="/privacy">Privacy</a> · v{{VERSION}} · {{CONTACT}}
+  </footer>
+  <script src="/static/auth.js"></script>
+</body>
+</html>

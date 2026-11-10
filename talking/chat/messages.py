@@ -80,6 +80,8 @@ class MessageStore:
             try:
                 self._chat.get_dialog(owner, msg.dialog_id)
             except KeyError:
+                if getattr(self._chat, "is_direct", lambda _d: False)(msg.dialog_id):
+                    raise KeyError("dialog not found")
                 if msg.dialog_id == DEFAULT_CONVERSATION:
                     self._chat.ensure_default_dialog(owner)
                 else:

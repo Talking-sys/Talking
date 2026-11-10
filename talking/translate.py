@@ -146,10 +146,18 @@ class Translator:
     def active_providers(self) -> list[Provider]:
         return [p for p in self.providers if p.available()[0]]
 
-    def translate(self, text: str, src: str, tgt: str, *, force: bool = False) -> TranslationResult:
+    def translate(
+        self,
+        text: str,
+        src: str,
+        tgt: str,
+        *,
+        force: bool = False,
+        always: bool = False,
+    ) -> TranslationResult:
         if not text.strip():
             return TranslationResult("", "none", 0)
-        if src == tgt and not force:
+        if src == tgt and not (force or always):
             return TranslationResult(text, "identity", 0)
         if self.force_offline:
             raise TranslationUnavailable("forced offline")

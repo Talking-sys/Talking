@@ -8,8 +8,8 @@ from fastapi import HTTPException, Request, WebSocket
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import JSONResponse, Response
 
-from talking.ids import check_id
-from talking.security import client_ip, unsign
+from talking.identity import server_user_id
+from talking.security import unsign
 
 from .crypto import ACCESS_COOKIE, ACCESS_COOKIE_DEV, CSRF_HEADER, REFRESH_COOKIE, REFRESH_COOKIE_DEV
 
@@ -18,6 +18,8 @@ log = logging.getLogger("talking.auth")
 CSRF_EXEMPT_PREFIXES = (
     "/api/sdk/",
     "/api/commercial/webhook",
+    "/api/auth/apple/callback",
+    "/api/auth/apple/notifications",
     "/healthz",
     "/readyz",
     "/static",
@@ -34,7 +36,7 @@ class UserContext:
     session_id: str | None = None
     session: object | None = None
     user: object | None = None
-    is_anonymous: bool = True
+    is_anonymous: bool = False
 
     @property
     def local(self) -> bool:
@@ -42,11 +44,7 @@ class UserContext:
 
 
 def local_user_id(app) -> str:
-    try:
-        uid = app.state.engine.store.get("user_id") or "local"
-        return check_id(uid)
-    except Exception:
-        return "local"
+    return server_user_id(app)
 
 
 def is_accounts(settings) -> bool:
@@ -69,7 +67,7 @@ def origin_allowlist(settings, request: Request | WebSocket | None = None) -> se
 def origin_ok(request: Request | WebSocket, settings) -> bool:
     origin = (request.headers.get("origin") or "").rstrip("/")
     if not origin:
-        return True
+        return False
     return origin in origin_allowlist(settings, request)
 
 
@@ -96,20 +94,18 @@ async def resolve_user(request: Request) -> UserContext:
     mode = (settings.auth_mode or "local").strip().lower()
     if mode != "accounts":
         return UserContext(
-            id=local_user_id(app), authenticated=True, auth_mode="local", is_anonymous=True,
+            id=local_user_id(app), authenticated=True, auth_mode="local", is_anonymous=False,
         )
     svc = app.state.auth
     raw = read_access_cookie(request)
     payload = unsign(app.state.secret, raw, "access") if raw else None
     loaded = await svc.load_access(payload) if payload else None
     if loaded is None:
-        return UserContext(id="", authenticated=False, auth_mode="accounts")
+        return UserContext(id="", authenticated=False, auth_mode="accounts", is_anonymous=False)
     user, sess = loaded
-    methods = await svc.store.list_identities(user.id)
-    anon = all(m.provider == "anonymous" for m in methods) if methods else True
     return UserContext(
         id=user.id, authenticated=True, auth_mode="accounts", status=user.status,
-        session_id=sess.id, session=sess, user=user, is_anonymous=anon,
+        session_id=sess.id, session=sess, user=user, is_anonymous=False,
     )
 
 
@@ -121,7 +117,10 @@ def require_user(request: Request) -> UserContext:
 
 
 async def authenticate_websocket(ws: WebSocket, t: str = "") -> UserContext | None:
-    """Return a user context, or None if the socket should be closed (caller closes)."""
+    """Return a user context, or None if the socket should be closed (caller closes).
+
+    A missing token is never the local operator — unauthenticated is not a user.
+    """
     app = ws.app
     settings = app.state.settings
     origins = origin_allowlist(settings, ws)
@@ -159,17 +158,18 @@ async def authenticate_websocket(ws: WebSocket, t: str = "") -> UserContext | No
             user, sess = loaded
             return UserContext(
                 id=user.id, authenticated=True, auth_mode="accounts", session_id=sess.id,
-                session=sess, user=user,
+                session=sess, user=user, is_anonymous=False,
             )
+        from talking.ids import check_id
         try:
             uid = check_id(uid) if uid else local_user_id(app)
         except ValueError:
-            uid = local_user_id(app)
-        return UserContext(id=uid, authenticated=True, auth_mode="local")
+            return None
+        if uid != local_user_id(app):
+            return None
+        return UserContext(id=uid, authenticated=True, auth_mode="local", is_anonymous=False)
 
-    if mode == "accounts":
-        return None
-    return UserContext(id=local_user_id(app), authenticated=True, auth_mode="local")
+    return None
 
 
 class AuthMiddleware(BaseHTTPMiddleware):
@@ -191,8 +191,8 @@ def _csrf_reject(request: Request, settings) -> Response | None:
     if not csrf_site_ok(request):
         return JSONResponse({"detail": "csrf site"}, status_code=403)
     user: UserContext = request.state.user
-    # Cookie-backed mutating calls need the CSRF header. Anonymous start/verify
-    # still get Origin + Sec-Fetch-Site (login CSRF).
+    # Cookie-backed mutating calls need the CSRF header. Login start/verify
+    # still get Origin + Sec-Fetch-Site (login CSRF; empty Origin is rejected).
     if user.authenticated and user.session_id:
         header = request.headers.get(CSRF_HEADER) or request.headers.get("x-csrf-token") or ""
         svc = request.app.state.auth
