@@ -25,6 +25,7 @@
       ariaCircle: "Кружочек",
       ariaTranscribe: "Расшифровать голосовую заметку",
       ariaLocked: "Расшифровка недоступна без Premium",
+      account: "Аккаунт",
     },
     en: {
       targetLang: "Note translation language",
@@ -46,6 +47,7 @@
       ariaCircle: "Round video note",
       ariaTranscribe: "Transcribe voice note",
       ariaLocked: "Transcription requires Premium",
+      account: "Account",
     },
   };
 

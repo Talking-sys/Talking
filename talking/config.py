@@ -132,6 +132,12 @@ class Settings:
     apple_authorize_url: str = field(default_factory=lambda: _env("APPLE_AUTHORIZE_URL", ""))
     apple_token_url: str = field(default_factory=lambda: _env("APPLE_TOKEN_URL", ""))
     apple_jwks_url: str = field(default_factory=lambda: _env("APPLE_JWKS_URL", ""))
+    # Sign-in UI placeholders. Google/passkey backends are later stages.
+    # AUTH_APPLE / AUTH_EMAIL only show the buttons; the APIs are already wired.
+    auth_google: bool = field(default_factory=lambda: _env_bool("AUTH_GOOGLE", False))
+    auth_apple: bool = field(default_factory=lambda: _env_bool("AUTH_APPLE", False))
+    auth_email: bool = field(default_factory=lambda: _env_bool("AUTH_EMAIL", False))
+    auth_passkey: bool = field(default_factory=lambda: _env_bool("AUTH_PASSKEY", False))
 
     s3_endpoint: str = field(default_factory=lambda: _env("S3_ENDPOINT", ""))
     s3_bucket: str = field(default_factory=lambda: _env("S3_BUCKET", ""))

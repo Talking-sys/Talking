@@ -301,3 +301,72 @@ def test_local_mode_still_issues_ws_token(make_client):
     assert me.json()["id"] == "local"
     assert me.json()["auth_mode"] == "local"
     assert me.json()["anonymous"] is False
+
+
+def test_auth_config_is_public_and_has_no_secrets(make_client):
+    c = _client(make_client)
+    r = c.get("/api/auth/config")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["auth_mode"] == "accounts"
+    assert body["methods"]["phone"] is True
+    assert body["methods"]["anonymous"] is False
+    assert body["methods"]["recovery"] is True
+    assert body["methods"]["google"] is False
+    assert body["methods"]["apple"] is False
+    assert body["methods"]["email"] is False
+    assert body["methods"]["passkey"] is False
+    blob = r.text.lower()
+    assert "twilio" not in blob
+    assert "token" not in blob
+    assert "secret" not in blob
+    assert "sid" not in blob
+
+
+def test_auth_config_placeholder_flags(make_client):
+    c = _client(
+        make_client,
+        AUTH_GOOGLE="1", AUTH_APPLE="1", AUTH_EMAIL="1", AUTH_PASSKEY="1",
+        SMS_COUNTRY_ALLOWLIST="US,DE", SMS_DEFAULT_REGION="DE",
+    )
+    body = c.get("/api/auth/config").json()
+    assert body["methods"]["google"] is True
+    assert body["methods"]["apple"] is True
+    assert body["methods"]["email"] is True
+    assert body["methods"]["passkey"] is True
+    assert body["default_region"] == "DE"
+    assert body["country_allowlist"] == ["US", "DE"]
+
+
+def test_auth_pages_and_methods_enabled(make_client):
+    c = _client(make_client)
+    signin = c.get("/signin")
+    assert signin.status_code == 200
+    assert 'id="phoneNational"' in signin.text
+    assert 'id="btnAnonymous"' not in signin.text
+    assert 'id="btnCallMe"' in signin.text
+    account = c.get("/account")
+    assert account.status_code == 200
+    assert 'id="sessionList"' in account.text
+    assert 'id="methodList"' in account.text
+    r = _session(c)
+    methods = c.get("/api/auth/methods")
+    assert methods.status_code == 200
+    body = methods.json()
+    assert "methods" in body
+    assert body["enabled"]["phone"] is True
+    assert body["enabled"]["anonymous"] is False
+    assert body["enabled"]["google"] is False
+    assert r.status_code == 200
+
+
+def test_signin_page_in_local_mode(make_client):
+    c = make_client()
+    r = c.get("/signin")
+    assert r.status_code == 200
+    assert 'data-page="signin"' in r.text
+    cfg = c.get("/api/auth/config").json()
+    assert cfg["auth_mode"] == "local"
+    assert c.get("/account").status_code == 200
+    assert 'href="/account"' in c.get("/").text
+    assert "Микрофон" in c.get("/").text

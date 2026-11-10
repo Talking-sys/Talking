@@ -136,6 +136,26 @@ Flow:
 
 Phones and codes are never logged. Identity `subject` is HMAC, not the number.
 
+## Web UI (`/signin`, `/account`)
+
+Static pages on the existing cookie session. **No tokens in `localStorage`**
+(CSRF stays in memory; `ui_lang` may be stored like the rest of the app).
+
+- **Sign-in** (`/signin`): phone (country + number, SMS code, resend cooldown,
+  explicit “call me instead”), optional recovery code. There is **no** continue
+  anonymously. Google / Apple / email / passkey **buttons** render only when
+  `GET /api/auth/config` reports them enabled (`AUTH_GOOGLE`, `AUTH_APPLE`,
+  `AUTH_EMAIL`, `AUTH_PASSKEY`; default off). Email and Apple **APIs** are
+  already shipped; Google and passkey backends are still later stages.
+- **Account security** (`/account`): sessions and devices (revoke one, sign out
+  everywhere) and linked methods (add phone, unlink but never the last method).
+- Russian and English. One column on a phone, two columns from 840px.
+- Rate-limit errors (`429`, `resend_cooldown`, `attempts_exhausted`) have
+  dedicated copy.
+
+`GET /api/auth/config` is public (no cookie). `GET /api/auth/methods` still
+requires a session and lists **linked** identities; it also echoes `enabled`.
+
 ## Sign in with Apple
 
 **Off unless configured.** Empty Apple env vars keep every Apple route at **503
@@ -245,7 +265,7 @@ address. Plus-tags are distinct addresses.
 | 3 | Google OAuth (`openid email profile` only). No auto-merge on email. |
 | 4 | Passkeys / WebAuthn. |
 | 5 | ~~Sign in with Apple~~ **done** (this document). Equal-prominence **button** is stage 6. |
-| 6 | Onboarding screens (Google / Apple / email / passkey / phone). No anonymous accounts. |
+| 6 | Remaining onboarding chrome (profile, passkey create). Sign-in / sessions UI is in this PR. No anonymous accounts. |
 | 7 | Account deletion, export, audit log UI; 90-day `auth_events` purge job. Full wipe after Apple `account-delete` when other methods remain is still a product decision. |
 
 ## Effort (implementation, not calendar)
@@ -267,4 +287,4 @@ See `.env.example`: `AUTH_MODE`, `PUBLIC_ORIGIN`, `LOG_SALT`, `DB_ENCRYPTION_KEY
 `SMS_DEFAULT_REGION`, `MAIL_PROVIDER`, `SMTP_HOST`, `SMTP_PORT`, `SMTP_USERNAME`,
 `SMTP_PASSWORD`, `SMTP_FROM`, `SMTP_STARTTLS`, `SMTP_SSL`, `APPLE_CLIENT_ID`,
 `APPLE_TEAM_ID`, `APPLE_KEY_ID`, `APPLE_PRIVATE_KEY` / `APPLE_PRIVATE_KEY_FILE`,
-`APPLE_REDIRECT_URI`.
+`APPLE_REDIRECT_URI`, `AUTH_GOOGLE`, `AUTH_APPLE`, `AUTH_EMAIL`, `AUTH_PASSKEY`.
