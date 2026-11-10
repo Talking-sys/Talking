@@ -1,8 +1,8 @@
-# Auth (M10 stages 0–1 + phone)
+# Auth (M10 stages 0–2 + phone + Sign in with Apple)
 
 Copyright (C) 2026 hateaboutyouone. Contact: hateaboutyou111@icloud.com.
 
-This document describes **what shipped** in the first auth PR and **what is left**.
+This document describes **what shipped** in the auth PRs and **what is left**.
 Google OAuth still requests only `openid email profile` — see `docs/GOOGLE_SCOPES.md`.
 Commercial entitlements stay behind `COMMERCIAL_API_URL` and are keyed by opaque user UUIDs.
 
@@ -12,37 +12,49 @@ and `docs/ROADMAP.md` M10. The verbatim spec is unchanged; the addendum records
 the decision (including the later change that SMS via Twilio Verify is the
 production path).
 
+Email passwordless (one-time code and/or magic link) is **stage 2** of the
+original §13 plan. It reuses `identities` / `login_challenges` / `sessions`.
+
 ## Modes
 
 | `AUTH_MODE` | When | Behaviour |
 |---|---|---|
 | `local` (default in development and tests) | Home Wi-Fi translator, pytest, Playwright | Single operator id (`USER_ID` or `local`). Not an anonymous user. HTTP uses that identity; WebSockets still require a signed token. |
-| `accounts` | Hosted multi-user | Cookie sessions, CSRF, phone sign-in. Unauthenticated clients are not users. Missing WS cookies/tokens close the socket. |
+| `accounts` | Hosted multi-user | Cookie sessions, CSRF, phone + email + Apple (when configured). Unauthenticated clients are not users. Missing WS cookies/tokens close the socket. |
 
 `AUTH_MODE=local` is **refused** when `APP_ENV=production`. Production also requires
 `APP_SECRET_KEY` (≥32 chars) and `LOG_SALT`. Production `accounts` requires `DATABASE_URL`.
 Production also requires `SMS_PROVIDER=twilio` plus `TWILIO_ACCOUNT_SID`,
 `TWILIO_AUTH_TOKEN`, and `TWILIO_VERIFY_SERVICE_SID`. `SMS_PROVIDER=console` (or
 unset, which defaults to console) is **refused** in production.
+Production also requires `MAIL_PROVIDER=smtp` plus `SMTP_HOST` and `SMTP_FROM`.
+`MAIL_PROVIDER=console` (or unset, which defaults to console) is **refused** in
+production.
 
 ## Stage 0 — Postgres foundation
 
 - SQLAlchemy 2 (async, asyncpg) + Alembic.
 - Initial migration `001_auth_foundation`: `users`, `identities`, `sessions`,
   `recovery_codes`, `auth_events` (no PII, **90-day retention** comment),
-  `login_challenges` (phone OTP / future email codes).
+  `login_challenges` (phone OTP / email codes and magic links).
+- Follow-up `002_email_challenge_target`: optional `login_challenges.target_enc`
+  (AES-GCM destination for magic-link consume; hash-only if no encryption key).
 - `users.status` is `active | deleting | deleted`. Nickname unique and nullable.
   `profile_private` defaults true. User ids are UUIDs.
-- `identities` unique (`provider`, `subject`). Provider in this PR: `phone`.
-  Email columns exist for later stages. Phone subject is `HMAC(phone)`; `phone_enc` is
-  AES-GCM with `DB_ENCRYPTION_KEY` (hash-only if the key is missing).
+- `identities` unique (`provider`, `subject`). Providers here: `phone`, `email`,
+  `apple`. Phone subject is `HMAC(phone)`; `phone_enc` is AES-GCM with
+  `DB_ENCRYPTION_KEY` (hash-only if the key is missing). Email subject / `email_hash`
+  is `HMAC(email)`; `email_enc` is AES-GCM with the same key (omitted when missing).
+  Email identities are created only after the code or link is verified
+  (`email_verified` is true). Apple subject is Apple’s opaque `sub` (needed to match
+  server-to-server notifications); Apple may also store hashed + AES-GCM email.
   There is **no anonymous provider** and no anonymous account creation.
 - Storage interface: in-memory (`AUTH_MODE=local` and tests) and Postgres (`AUTH_MODE=accounts`
   with `DATABASE_URL`).
 - CI runs Postgres and an Alembic upgrade / downgrade / upgrade test (`TEST_DATABASE_URL`).
 
-Passkeys, email `login_tokens`, OAuth states, and WebAuthn challenges are **not**
-implemented here (stubs only via unused identity providers).
+Passkeys, Google OAuth, and WebAuthn challenges are **not** implemented here.
+Apple OAuth state/nonce/PKCE live in `login_challenges` (`kind=apple_oauth`, 10 min, single use).
 
 ## Stage 1 — sessions and server-side identity
 
@@ -63,11 +75,13 @@ Endpoints:
 - `POST /api/auth/logout` / `POST /api/auth/logout-all`
 - `GET /api/auth/me` / `GET /api/auth/sessions` / `DELETE /api/auth/sessions/{id}`
 - `GET /api/auth/methods` / `DELETE /api/auth/methods/{id}` — unlink a sign-in method (not the last one)
+- `GET /api/auth/providers` — which sign-in methods are configured (`apple` is false until env is set)
 
 CSRF: `SameSite=Lax` + `Origin` / `Sec-Fetch-Site` + `X-CSRF-Token` on POST/PATCH/DELETE
 when a session cookie is present. **Empty `Origin` is rejected.** CORS with credentials
 only for an explicit allowlist (`PUBLIC_ORIGIN` and `APP_CORS_ORIGINS`). Exempt:
-`/api/sdk/`, commercial webhook.
+`/api/sdk/`, commercial webhook, Apple `form_post` callback, Apple server-to-server
+notifications.
 
 Identity lives in `talking/identity.py`. `request_user_id` uses the signed-in session
 in `accounts` mode and the operator id in `local` mode. Request-body `sender_id` is
@@ -129,9 +143,10 @@ Static pages on the existing cookie session. **No tokens in `localStorage`**
 
 - **Sign-in** (`/signin`): phone (country + number, SMS code, resend cooldown,
   explicit “call me instead”), optional recovery code. There is **no** continue
-  anonymously. Google / Apple / email / passkey **placeholders** render only when
+  anonymously. Google / Apple / email / passkey **buttons** render only when
   `GET /api/auth/config` reports them enabled (`AUTH_GOOGLE`, `AUTH_APPLE`,
-  `AUTH_EMAIL`, `AUTH_PASSKEY`; default off). Those flows are still later stages.
+  `AUTH_EMAIL`, `AUTH_PASSKEY`; default off). Email and Apple **APIs** are
+  already shipped; Google and passkey backends are still later stages.
 - **Account security** (`/account`): sessions and devices (revoke one, sign out
   everywhere) and linked methods (add phone, unlink but never the last method).
 - Russian and English. One column on a phone, two columns from 840px.
@@ -141,27 +156,135 @@ Static pages on the existing cookie session. **No tokens in `localStorage`**
 `GET /api/auth/config` is public (no cookie). `GET /api/auth/methods` still
 requires a session and lists **linked** identities; it also echoes `enabled`.
 
-## Left for later stages (2–7)
+## Sign in with Apple
+
+**Off unless configured.** Empty Apple env vars keep every Apple route at **503
+`apple_unconfigured`**. Partial config (some vars set, not all) is refused at
+startup. Production does **not** require Apple.
+
+Flow: authorization **code** + **PKCE S256** + **state** + **nonce**. The authorize
+request uses `response_mode=form_post` (required by Apple when asking for `name`
+and `email`). Redirect URI is the env value only — **exact match**, `https://`, no
+caller-supplied override.
+
+1. `GET /api/auth/apple/start` — redirect to Apple (sign-in / registration).
+2. `POST /api/auth/apple/start` `{intent: "link"}` — same redirect, bound to the
+   **current** user. Requires a **fresh** session (10 minutes) and CSRF. GET +
+   `intent=link` is rejected (CSRF).
+3. `POST /api/auth/apple/callback` (also GET query) — Apple `form_post`. Exchange
+   code at Apple’s token endpoint with a **server-generated client-secret JWT**
+   (ES256, team id / key id / Services ID; private key from env or file). Validate
+   the ID token against Apple JWKS (`iss=https://appleid.apple.com`, `aud` = client
+   id, `exp`, `nonce`).
+4. `POST /api/auth/apple/notifications` — Apple server-to-server JWT. Handles
+   `consent-revoked` / `account-delete` (unlink Apple; if it was the last method,
+   mark the user `deleting` and revoke sessions) and `email-disabled` (drop stored
+   email). Unknown `sub` → 200 (idempotent). Invalid JWT → 401.
+5. `GET /api/auth/providers` — `{apple: true/false, ...}` for the future onboarding UI.
+
+**Never auto-merge.** Matching email (including Hide My Email / private relay) does
+**not** attach to another account. The only Apple identity key is `sub`. Linking an
+Apple `sub` that already belongs to someone else → **409 `apple_taken`**.
+
+**Private relay and first-sign-in name.** Hide My Email addresses
+(`@privaterelay.appleid.com` / `is_private_email`) are stored hashed + encrypted on
+the identity, never logged, never used as a merge key, never returned from
+`/api/auth/methods`. Apple sends `name` **only on the first authorization**; later
+callbacks omit it. If the account has no nickname, the given name is used when it
+is unique; last name is not stored.
+
+Client secret, authorization codes, ID tokens, refresh tokens, and the `.p8` are
+never written to the repo, logs, or the frontend bundle.
+
+### What the owner needs from the Apple Developer account
+
+Paid **Apple Developer Program** membership. Then:
+
+1. **App ID** (bundle id, e.g. `com.talking.app`) with **Sign in with Apple** enabled.
+   On that App ID, set the **Server-to-Server Notification Endpoint** to
+   `https://<production-host>/api/auth/apple/notifications` (HTTPS only).
+2. **Services ID** (web client id, e.g. `com.talking.web`) — this is `APPLE_CLIENT_ID`.
+   Do not reuse the iOS bundle id as the web client. Enable Sign in with Apple on it.
+   Return URLs must **exactly** equal `APPLE_REDIRECT_URI`
+   (`https://<production-host>/api/auth/apple/callback`). Register the production
+   domain under associated domains. No `http://`, no extra trailing slash unless the
+   env value has one.
+3. **Key** (Keys → Sign in with Apple) — download the `.p8` **once**. `APPLE_KEY_ID`
+   is the key id; `APPLE_TEAM_ID` is Membership → Team ID. Put the PEM in
+   `APPLE_PRIVATE_KEY` (or `APPLE_PRIVATE_KEY_FILE` pointing outside the repo).
+   Rotate by minting a new key; never commit `.p8`.
+4. **Privacy / terms** URLs live (same as Google). Support email:
+   **hateaboutyou111@icloud.com**.
+5. iOS / Android each get their **own** client (bundle id / package). This PR
+   implements the **web** Services ID authorization-code flow. Native clients can
+   still POST the authorization code to the same callback after a future platform
+   client is registered.
+6. Sign in with Apple must have **equal prominence** next to Google on the
+   onboarding screens (stage 6). This PR is backend only.
+7. Apple requires an account-deletion path (stage 7 UI). The S2S
+   `account-delete` / `consent-revoked` handler is already wired.
+
+## Email (stage 2)
+
+**Provider:** pluggable `MailProvider`. Generic **SMTP** (`smtplib`, stdlib) is the
+production path. `MAIL_PROVIDER=console` is a **local development / test sink only**
+— it never prints the destination, code, or magic link. Startup (and
+`POST /api/auth/email/start`) refuses console or missing `SMTP_HOST` / `SMTP_FROM`
+when `APP_ENV=production`.
+
+Codes and magic-link tokens are generated on this server (hashed in
+`login_challenges`; 10 min TTL, 5 attempts on the code, single use). Using the
+code consumes the matching link for that address, and vice versa.
+
+Flow:
+
+1. `POST /api/auth/email/start` `{email, channel?: "code"|"link"|"both"}` —
+   omitted channel defaults to **`both`**. Address is lower-cased; the domain is
+   IDNA. Rate limits: **3 sends / 15 min per address**, **10 / hour per IP**,
+   **60 s resend cooldown**. `debug_code` / `debug_token` are returned only when
+   `APP_ENV` is test/development.
+2. `POST /api/auth/email/verify` `{email, code}` — find or **create** an account
+   (never merge with a different signed-in user). Identity is written only after
+   this check.
+3. `POST /api/auth/email/consume` `{token}` or `GET /api/auth/email/consume?token=`
+   — same as verify, via the magic link. GET is a 303 to `/` with session cookies
+   (`SameSite=Lax` so a click from the mail client works). The token is not kept
+   in `localStorage`.
+4. `POST /api/auth/email/link` `{email, code}` or `{token}` — attach the address
+   to the **current** user. Requires a **fresh** session. If the address already
+   belongs to someone else → **409 `email_taken`** (no auto-merge).
+5. Unlink: `DELETE /api/auth/methods/{id}`.
+
+Emails, codes, and tokens are never logged. Identity `subject` is HMAC, not the
+address. Plus-tags are distinct addresses.
+
+## Left for later stages (3–7)
 
 | Stage | Scope |
 |---|---|
-| 2 | Email magic link / one-time code (10 min, hashed). Reuse `login_challenges`. |
 | 3 | Google OAuth (`openid email profile` only). No auto-merge on email. |
 | 4 | Passkeys / WebAuthn. |
-| 5 | Sign in with Apple, equal prominence, private relay. |
+| 5 | ~~Sign in with Apple~~ **done** (this document). Equal-prominence **button** is stage 6. |
 | 6 | Remaining onboarding chrome (profile, passkey create). Sign-in / sessions UI is in this PR. No anonymous accounts. |
-| 7 | Account deletion, export, audit log UI; 90-day `auth_events` purge job. |
+| 7 | Account deletion, export, audit log UI; 90-day `auth_events` purge job. Full wipe after Apple `account-delete` when other methods remain is still a product decision. |
 
 ## Effort (implementation, not calendar)
 
 Stages 0–1 were scoped at about **2–3 focused days**. Phone is about **+1–1.5 days**
-(provider abstraction, E.164, abuse controls, link/no-merge). Remaining stages 2–7 are
-about **9–12 days** depending on Apple/Google console setup. Whole M10 plan including
-phone: roughly **12–16 days** of implementation once secrets and provider accounts exist.
+(provider abstraction, E.164, abuse controls, link/no-merge). Email (stage 2) is
+about **+1 day** (SMTP/console providers, OTP + magic link, the same rate limits
+and no-merge rules). Apple is about **+1 day** once the Developer account,
+Services ID, key, and exact redirect URI exist. Remaining stages 3–4, 6–7 are
+about **7–10 days** depending on Google console setup. Whole M10 plan including
+phone, email, and Apple: roughly **13–17 days** of implementation once secrets
+and provider accounts exist.
 
 ## Env (placeholders only — never commit real values)
 
 See `.env.example`: `AUTH_MODE`, `PUBLIC_ORIGIN`, `LOG_SALT`, `DB_ENCRYPTION_KEY`,
 `DATABASE_URL`, `APP_SECRET_KEY`, `SMS_PROVIDER`, `TWILIO_ACCOUNT_SID`,
 `TWILIO_AUTH_TOKEN`, `TWILIO_VERIFY_SERVICE_SID`, `SMS_COUNTRY_ALLOWLIST`,
-`SMS_DEFAULT_REGION`, `AUTH_GOOGLE`, `AUTH_APPLE`, `AUTH_EMAIL`, `AUTH_PASSKEY`.
+`SMS_DEFAULT_REGION`, `MAIL_PROVIDER`, `SMTP_HOST`, `SMTP_PORT`, `SMTP_USERNAME`,
+`SMTP_PASSWORD`, `SMTP_FROM`, `SMTP_STARTTLS`, `SMTP_SSL`, `APPLE_CLIENT_ID`,
+`APPLE_TEAM_ID`, `APPLE_KEY_ID`, `APPLE_PRIVATE_KEY` / `APPLE_PRIVATE_KEY_FILE`,
+`APPLE_REDIRECT_URI`, `AUTH_GOOGLE`, `AUTH_APPLE`, `AUTH_EMAIL`, `AUTH_PASSKEY`.

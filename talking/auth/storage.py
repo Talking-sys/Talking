@@ -20,10 +20,13 @@ from .types import (
 class AuthStorage(Protocol):
     async def create_user(self, user: UserRecord) -> UserRecord: ...
     async def get_user(self, user_id: str) -> UserRecord | None: ...
+    async def get_user_by_nickname(self, nickname: str) -> UserRecord | None: ...
+    async def save_user(self, user: UserRecord) -> UserRecord: ...
     async def create_identity(self, ident: IdentityRecord) -> IdentityRecord: ...
     async def get_identity(self, provider: str, subject: str) -> IdentityRecord | None: ...
     async def get_identity_by_id(self, ident_id: str) -> IdentityRecord | None: ...
     async def list_identities(self, user_id: str) -> list[IdentityRecord]: ...
+    async def save_identity(self, ident: IdentityRecord) -> IdentityRecord: ...
     async def delete_identity(self, ident_id: str) -> bool: ...
     async def create_session(self, sess: SessionRecord) -> SessionRecord: ...
     async def get_session(self, session_id: str) -> SessionRecord | None: ...
@@ -38,6 +41,7 @@ class AuthStorage(Protocol):
     async def log_event(self, ev: AuthEventRecord) -> None: ...
     async def create_challenge(self, ch: ChallengeRecord) -> ChallengeRecord: ...
     async def get_challenge(self, challenge_id: str) -> ChallengeRecord | None: ...
+    async def get_challenge_by_code_hash(self, code_hash: str) -> ChallengeRecord | None: ...
     async def latest_challenge(self, subject_hash: str, kind: str) -> ChallengeRecord | None: ...
     async def save_challenge(self, ch: ChallengeRecord) -> ChallengeRecord: ...
     async def aclose(self) -> None: ...
@@ -63,6 +67,20 @@ class MemoryAuthStorage:
     async def get_user(self, user_id: str) -> UserRecord | None:
         return self.users.get(user_id)
 
+    async def get_user_by_nickname(self, nickname: str) -> UserRecord | None:
+        want = (nickname or "").strip()
+        if not want:
+            return None
+        for user in self.users.values():
+            if (user.nickname or "") == want:
+                return user
+        return None
+
+    async def save_user(self, user: UserRecord) -> UserRecord:
+        with self._lock:
+            self.users[user.id] = user
+        return user
+
     async def create_identity(self, ident: IdentityRecord) -> IdentityRecord:
         with self._lock:
             for existing in self.identities.values():
@@ -82,6 +100,11 @@ class MemoryAuthStorage:
 
     async def list_identities(self, user_id: str) -> list[IdentityRecord]:
         return [i for i in self.identities.values() if i.user_id == user_id]
+
+    async def save_identity(self, ident: IdentityRecord) -> IdentityRecord:
+        with self._lock:
+            self.identities[ident.id] = ident
+        return ident
 
     async def delete_identity(self, ident_id: str) -> bool:
         with self._lock:
@@ -160,6 +183,12 @@ class MemoryAuthStorage:
     async def get_challenge(self, challenge_id: str) -> ChallengeRecord | None:
         return self.challenges.get(challenge_id)
 
+    async def get_challenge_by_code_hash(self, code_hash: str) -> ChallengeRecord | None:
+        rows = [c for c in self.challenges.values() if c.code_hash == code_hash]
+        if not rows:
+            return None
+        return max(rows, key=lambda c: c.created_at)
+
     async def latest_challenge(self, subject_hash: str, kind: str) -> ChallengeRecord | None:
         rows = [c for c in self.challenges.values() if c.subject_hash == subject_hash and c.kind == kind]
         if not rows:
@@ -208,6 +237,31 @@ class PostgresAuthStorage:
             row = await db.get(User, _uuid(user_id))
             return _user_rec(row) if row else None
 
+    async def get_user_by_nickname(self, nickname: str) -> UserRecord | None:
+        from sqlalchemy import select
+        from .models import User
+        want = (nickname or "").strip()
+        if not want:
+            return None
+        async with self._sf() as db:
+            q = await db.execute(select(User).where(User.nickname == want))
+            row = q.scalar_one_or_none()
+            return _user_rec(row) if row else None
+
+    async def save_user(self, user: UserRecord) -> UserRecord:
+        from .models import User
+        async with self._sf() as db:
+            row = await db.get(User, _uuid(user.id))
+            if row is not None:
+                row.status = user.status
+                row.nickname = user.nickname
+                row.native_lang = user.native_lang
+                row.ui_lang = user.ui_lang
+                row.profile_private = user.profile_private
+                row.updated_at = user.updated_at
+                await db.commit()
+        return user
+
     async def create_identity(self, ident: IdentityRecord) -> IdentityRecord:
         from .models import Identity
         async with self._sf() as db:
@@ -243,6 +297,18 @@ class PostgresAuthStorage:
         async with self._sf() as db:
             q = await db.execute(select(Identity).where(Identity.user_id == _uuid(user_id)))
             return [_ident_rec(r) for r in q.scalars().all()]
+
+    async def save_identity(self, ident: IdentityRecord) -> IdentityRecord:
+        from .models import Identity
+        async with self._sf() as db:
+            row = await db.get(Identity, _uuid(ident.id))
+            if row is not None:
+                row.email_hash = ident.email_hash
+                row.email_enc = ident.email_enc
+                row.email_verified = ident.email_verified
+                row.phone_enc = ident.phone_enc
+                await db.commit()
+        return ident
 
     async def delete_identity(self, ident_id: str) -> bool:
         from .models import Identity
@@ -385,6 +451,19 @@ class PostgresAuthStorage:
             row = await db.get(LoginChallenge, _uuid(challenge_id))
             return _chal_rec(row) if row else None
 
+    async def get_challenge_by_code_hash(self, code_hash: str) -> ChallengeRecord | None:
+        from sqlalchemy import desc, select
+        from .models import LoginChallenge
+        async with self._sf() as db:
+            q = await db.execute(
+                select(LoginChallenge)
+                .where(LoginChallenge.code_hash == code_hash)
+                .order_by(desc(LoginChallenge.created_at))
+                .limit(1)
+            )
+            row = q.scalar_one_or_none()
+            return _chal_rec(row) if row else None
+
     async def latest_challenge(self, subject_hash: str, kind: str) -> ChallengeRecord | None:
         from sqlalchemy import desc, select
         from .models import LoginChallenge
@@ -461,6 +540,7 @@ def _chal_rec(row) -> ChallengeRecord:
         attempts=row.attempts, max_attempts=row.max_attempts, created_at=_dt(row.created_at),
         expires_at=_dt(row.expires_at), consumed_at=_dt(row.consumed_at) if row.consumed_at else None,
         ip_hash=row.ip_hash, user_id=str(row.user_id) if row.user_id else None,
+        target_enc=row.target_enc,
     )
 
 
@@ -470,6 +550,7 @@ def _chal_model(ch: ChallengeRecord):
         id=_uuid(ch.id), kind=ch.kind, subject_hash=ch.subject_hash, channel=ch.channel,
         provider=ch.provider, provider_ref=ch.provider_ref, code_hash=ch.code_hash,
         attempts=ch.attempts, max_attempts=ch.max_attempts, created_at=ch.created_at,
-        expires_at=ch.expires_at, consumed_at=ch.consumed_at, ip_hash=ch.ip_hash,
+        expires_at=ch.expires_at, consumed_at=ch.consumed_at,         ip_hash=ch.ip_hash,
         user_id=_uuid(ch.user_id) if ch.user_id else None,
+        target_enc=ch.target_enc,
     )
