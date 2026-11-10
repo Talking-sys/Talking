@@ -60,8 +60,9 @@ def test_playwright_translate_both_modes(make_client):
             page = context.new_page()
             page.goto(url, wait_until="domcontentloaded")
             page.wait_for_selector("#recordBtn")
+            page.wait_for_selector('#source option[value="auto"]', timeout=8000)
             assert page.locator("#modeLive").get_attribute("aria-selected") == "true"
-            assert page.locator("#source").locator("option[value=auto]").count() == 1
+            assert page.locator("#source").locator('option[value="auto"]').count() == 1
             assert page.locator("#target option").count() > 10
             page.select_option("#target", "ru")
             idle_live = ARTIFACTS / "voice_translate_live_idle.png"
