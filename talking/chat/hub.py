@@ -41,6 +41,9 @@ class ChatHub:
                 seen.add(uid)
                 self.publish(uid, event)
 
+    def publish_many(self, user_ids, event: dict) -> None:
+        self.publish_users(user_ids, event)
+
     def publish(self, user_id: str, event: dict) -> None:
         """Fan-out. Safe from worker threads (transcription jobs)."""
         def _fanout() -> None:
@@ -71,10 +74,11 @@ class ChatHub:
         extra_user_ids: list[str] | None = None,
     ) -> None:
         event = {"type": "message_edited", "message": msg_public}
+        dialog = str(msg_public.get("conversation_id") or msg_public.get("dialog_id") or "")
         keys = {
             str(user_id or ""),
             str(msg_public.get("sender_id") or ""),
-            str(msg_public.get("conversation_id") or msg_public.get("dialog_id") or ""),
+            dialog,
         }
         for uid in extra_user_ids or ():
             if uid:

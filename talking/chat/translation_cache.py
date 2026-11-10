@@ -23,9 +23,19 @@ class MessageTranslationCache:
         self._vals: dict[str, str] = {}
         self._by_msg_lang: dict[str, dict] = {}
 
-    def store(self, message_id: str, text: str, src: str, tgt: str, translation: str,
-              *, provider: str | None = None, failed: bool = False) -> None:
+    def store(
+        self,
+        message_id: str,
+        text: str,
+        src: str,
+        tgt: str,
+        translation: str,
+        *,
+        provider: str | None = None,
+        failed: bool = False,
+    ) -> None:
         k = _body_key(text, src, tgt)
+        mk = _msg_key(message_id, tgt)
         rec = {
             "text": translation,
             "src": src,
@@ -33,15 +43,12 @@ class MessageTranslationCache:
             "provider": provider,
             "failed": bool(failed),
         }
-        mk = _msg_key(message_id, tgt)
         with self._lock:
-            old_rec = self._by_msg_lang.get(mk)
-            if old_rec:
-                self._vals.pop(_body_key(text, old_rec.get("src") or src, tgt), None)
             old_body = self._by_msg.get(mk)
             if old_body and old_body != k:
                 self._vals.pop(old_body, None)
             self._by_msg[mk] = k
+            self._by_msg[message_id] = k
             self._vals[k] = translation
             self._by_msg_lang[mk] = rec
 
@@ -64,24 +71,29 @@ class MessageTranslationCache:
 
     def invalidate_message(self, message_id: str, old_text: str | None = None) -> None:
         with self._lock:
-            drop_lang = [key for key in self._by_msg_lang if key.startswith(message_id + "\x1f")]
-            for key in drop_lang:
-                rec = self._by_msg_lang.pop(key, None)
-                body = self._by_msg.pop(key, None)
+            drop_ids = [mid for mid in self._by_msg
+                        if mid == message_id or mid.startswith(message_id + "\x1f")]
+            bodies = set()
+            for mid in drop_ids:
+                body = self._by_msg.pop(mid, None)
                 if body:
-                    self._vals.pop(body, None)
-                if rec:
-                    self._vals.pop(_body_key(old_text or "", rec.get("src") or "", rec.get("tgt") or ""), None)
-            k = self._by_msg.pop(message_id, None)
-            if k:
-                self._vals.pop(k, None)
+                    bodies.add(body)
+            drop_lang = [
+                key for key in self._by_msg_lang
+                if key.startswith(message_id + "\x1f")
+            ]
+            for key in drop_lang:
+                self._by_msg_lang.pop(key, None)
             if old_text:
-                drop = [key for key in self._vals if key.endswith("\x1f" + old_text)]
-                for key in drop:
-                    self._vals.pop(key, None)
-                stale_ids = [mid for mid, key in self._by_msg.items() if key.endswith("\x1f" + old_text)]
+                bodies.update(key for key in self._vals if key.endswith("\x1f" + old_text))
+                stale_ids = [
+                    mid for mid, key in self._by_msg.items()
+                    if key.endswith("\x1f" + old_text)
+                ]
                 for mid in stale_ids:
                     self._by_msg.pop(mid, None)
+            for body in bodies:
+                self._vals.pop(body, None)
 
     def clear(self) -> None:
         with self._lock:

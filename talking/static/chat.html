@@ -43,6 +43,12 @@
       <small id="net">кружочки · заметки</small>
       <small id="typing" hidden></small>
     </div>
+    <label class="field dialog-mini">
+      <span class="sr-only" data-i18n="dialogs">Чаты</span>
+      <select id="dialogSelect" aria-label="Чаты"></select>
+    </label>
+    <button type="button" id="newGroupBtn" class="ui-lang-btn group-btn" data-i18n="newGroup">Группа</button>
+    <button type="button" id="groupInfoBtn" class="ui-lang-btn group-btn" hidden data-i18n="members">Участники</button>
     <div class="ui-lang" role="group" aria-label="Interface language">
       <button type="button" id="uiLangRu" class="ui-lang-btn" aria-pressed="true" lang="ru">RU</button>
       <button type="button" id="uiLangEn" class="ui-lang-btn" aria-pressed="false" lang="en">EN</button>
@@ -97,6 +103,36 @@
     <button id="sendText" type="submit" class="send-text" hidden>Отправить</button>
   </form>
 
+  <aside id="groupPanel" class="group-panel" hidden>
+    <header class="group-panel-head">
+      <strong data-i18n="groupSettings">Группа</strong>
+      <button type="button" id="groupPanelClose" class="ui-lang-btn">×</button>
+    </header>
+    <form id="groupMetaForm" class="group-form">
+      <label> <span data-i18n="groupName">Название</span>
+        <input id="groupName" maxlength="80" autocomplete="off">
+      </label>
+      <label> <span data-i18n="groupAvatar">Аватар (https или эмодзи)</span>
+        <input id="groupAvatar" maxlength="500" autocomplete="off">
+      </label>
+      <label> <span data-i18n="groupDesc">Описание</span>
+        <input id="groupDesc" maxlength="200" autocomplete="off">
+      </label>
+      <button type="submit" class="group-action-btn" data-i18n="saveGroup">Сохранить</button>
+    </form>
+    <ul id="groupMembers" class="group-members"></ul>
+    <form id="addMemberForm" class="group-form">
+      <label> <span data-i18n="addMember">Добавить user_id</span>
+        <input id="addMemberId" maxlength="64" autocomplete="off">
+      </label>
+      <button type="submit" class="group-action-btn" data-i18n="add">Добавить</button>
+    </form>
+    <div class="group-actions">
+      <button type="button" id="inviteBtn" class="ui-lang-btn" data-i18n="invite">Пригласить</button>
+      <button type="button" id="leaveBtn" class="ui-lang-btn" data-i18n="leave">Выйти</button>
+    </div>
+    <p id="inviteOut" class="invite-out" hidden></p>
+  </aside>
   <div id="toast" class="toast" hidden></div>
   <footer>
     <a href="/">Переводчик</a> · <a href="/translate">Голос</a> ·

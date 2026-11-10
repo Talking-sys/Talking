@@ -9,16 +9,16 @@ Unified after merging notes (PR #3), link previews (PR #5), and edits (PR #6):
 - ``routes.py`` keeps dialog/notes/media paths
 - On-demand premium transcription in ``transcribe.py``
 
-M4 1:1 (nicks, direct dialogs, receipts, typing, block/report, translation)
-extends this store. Still not in this slice: groups, stickers, polls,
-Postgres swap, 3-minute auto-delete. See ``docs/CHAT_NOTES.md``.
+M4 1:1 chat and M6 groups extend this store. Stickers, polls, geo, Postgres
+swap, and 3-minute auto-delete remain out of scope. See ``docs/CHAT_NOTES.md``,
+``docs/CHAT_EDITING.md``, and ``docs/CHAT_GROUPS.md``.
 """
 
 STAGE = "notes-slice"
 STATUS = "partial"
 PARTIAL = [
     "notes", "link_previews", "message_edit", "voice_transcription",
-    "direct", "nicks", "receipts", "typing", "block", "translation",
+    "direct", "nicks", "receipts", "typing", "block", "translation", "groups",
 ]
 
 from .edits import EditError, apply_text_edit, check_can_edit  # noqa: E402,F401

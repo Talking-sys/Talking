@@ -220,6 +220,14 @@ class Settings:
     # Telegram ~48 h from original send. 0 = unlimited.
     chat_edit_window_s: int = field(default_factory=lambda: _env_int("CHAT_EDIT_WINDOW_S", 48 * 3600))
     chat_edit_rate_per_min: int = field(default_factory=lambda: _env_int("CHAT_EDIT_RATE_PER_MIN", 20))
+    # Groups (M6). Trial cap applies only when the commercial service is configured.
+    chat_group_max_members: int = field(default_factory=lambda: _env_int("CHAT_GROUP_MAX_MEMBERS", 20))
+    chat_group_trial_max_members: int = field(
+        default_factory=lambda: _env_int("CHAT_GROUP_TRIAL_MAX_MEMBERS", 5)
+    )
+    chat_group_invite_ttl_s: int = field(
+        default_factory=lambda: _env_int("CHAT_GROUP_INVITE_TTL_S", 7 * 24 * 3600)
+    )
 
     # Voice translation (press-and-hold live + record). Live is free in core;
     # VOICE_TRANSLATE_LIVE_PREMIUM=1 gates it on the commercial licence hook.

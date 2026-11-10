@@ -14,14 +14,17 @@ from ..unfurl.urls import extract_urls
 from .edits import EditError, first_url_changed
 from .events import ChatHub, ensure_hub
 from .messages import DEFAULT_CONVERSATION, MAX_TEXT, MessageStore
+from .present import fill_translations, public_message, publish_message
 from .translation_cache import MessageTranslationCache
 
 
 def _can_access(store: MessageStore, user_id: str, conversation_id: str) -> bool:
-    """File-backed ChatStore is namespaced by user; direct dialogs check membership."""
+    """File-backed dialogs are user-scoped unless direct or group membership applies."""
     conv = conversation_id or DEFAULT_CONVERSATION
     chat = getattr(store, "_chat", None)
     if chat is not None:
+        if chat.is_group(conv):
+            return chat.groups.is_member(conv, user_id)
         try:
             chat.get_dialog(user_id, conv)
             return True
@@ -72,11 +75,17 @@ def register_message_routes(
         conv = conversation_id or DEFAULT_CONVERSATION
         if not _can_access(store, uid, conv):
             raise HTTPException(403, "not a participant")
+        rows = store.list(conv, limit, user_id=uid)
+        chat = getattr(store, "_chat", None)
+        if chat is not None and chat.is_group(conv):
+            messages = [public_message(request.app, uid, m) for m in rows]
+        else:
+            messages = [m.to_dict() for m in rows]
         return {
             "ok": True,
             "conversation_id": conv,
             "user_id": uid,
-            "messages": [m.to_dict() for m in store.list(conv, limit, user_id=uid)],
+            "messages": messages,
             "edit_window_s": _window(request),
             "max_text": MAX_TEXT,
         }
@@ -117,6 +126,16 @@ def register_message_routes(
             preview=preview,
             user_id=uid,
         )
+        chat = getattr(store, "_chat", None)
+        if chat is not None and chat.is_group(conv):
+            group = chat.groups.get(conv)
+            src = str(data.get("src_lang") or "") or (
+                group.member(uid).lang if group and group.member(uid) else "en"
+            )
+            fill_translations(request.app, msg, src_lang=src, members=group.members if group else [])
+            chat.update_message(uid, msg)
+            publish_message(request.app, msg, actor_id=uid)
+            return {"ok": True, "message": public_message(request.app, uid, msg)}
         return {"ok": True, "message": msg.to_dict()}
 
     @app.patch("/api/chat/messages/{message_id}")
@@ -162,6 +181,21 @@ def register_message_routes(
             urls, preview = _refresh_preview(unfurl, msg.text, old_urls, old_preview)
             msg.urls = urls
             msg.preview = preview
+            chat = getattr(store, "_chat", None)
+            if chat is not None and chat.is_group(msg.dialog_id):
+                group = chat.groups.get(msg.dialog_id)
+                src = msg.src_lang or (
+                    group.member(uid).lang if group and group.member(uid) else "en"
+                )
+                fill_translations(
+                    request.app, msg, src_lang=src, members=group.members if group else [],
+                )
+                chat.update_message(uid, msg)
+                if group is not None:
+                    for member in group.members:
+                        public = public_message(request.app, member.user_id, msg)
+                        hub.publish(member.user_id, {"type": "message_edited", "message": public})
+                return {"ok": True, "message": public_message(request.app, uid, msg), "changed": True}
             public = msg.to_dict()
             extra: list[str] = []
             chat = getattr(store, "_chat", None)

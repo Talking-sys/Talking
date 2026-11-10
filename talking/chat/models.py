@@ -7,7 +7,7 @@ conversation key is ``dialog_id``; ``conversation_id`` is the alias used by
 """
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 from typing import Any
 
 from .edits import public_edit_fields
@@ -16,6 +16,7 @@ MESSAGE_TYPES = ("text", "voice_note", "video_note")
 NOTE_TYPES = ("voice_note", "video_note")
 _ALIAS_KEYS = (
     "play_url", "kind", "type", "conversation_id", "dialog_id", "edited",
+    "original", "translation_status", "translation_reason",
     "unread_count", "peer", "last_message",
 )
 
@@ -26,24 +27,38 @@ class Dialog:
     title: str
     created_at: float
     updated_at: float
-    kind: str = "local"  # local | direct
+    kind: str = "local"
     participants: list[str] = field(default_factory=list)
     last_message_id: str | None = None
     last_sender_id: str | None = None
     last_preview: str = ""
     last_type: str | None = None
     prefs: dict[str, Any] = field(default_factory=dict)
+    avatar: str | None = None
+    description: str | None = None
+    member_count: int | None = None
+    role: str | None = None
 
-    def to_public(self, *, viewer_id: str | None = None, extra: dict[str, Any] | None = None) -> dict[str, Any]:
+    def to_public(
+        self, *, viewer_id: str | None = None, extra: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
         d = {
             "id": self.id,
             "title": self.title,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
-            "kind": self.kind,
+            "kind": self.kind if self.kind in ("local", "direct", "group") else "local",
         }
         if self.kind == "direct":
             d["participants"] = list(self.participants)
+        if self.avatar is not None:
+            d["avatar"] = self.avatar
+        if self.description is not None:
+            d["description"] = self.description
+        if self.member_count is not None:
+            d["member_count"] = self.member_count
+        if self.role is not None:
+            d["role"] = self.role
         if extra:
             d.update(extra)
         if viewer_id and self.kind == "direct":
@@ -63,6 +78,10 @@ class Dialog:
             "last_preview": self.last_preview,
             "last_type": self.last_type,
             "prefs": dict(self.prefs or {}),
+            "avatar": self.avatar,
+            "description": self.description,
+            "member_count": self.member_count,
+            "role": self.role,
         }
 
     @classmethod
@@ -107,7 +126,7 @@ class Message:
     original_text: str | None = None
     revisions: list[dict] = field(default_factory=list)
     extra: dict[str, Any] = field(default_factory=dict)
-    # Per (message, target_lang) cache persisted on the row.
+    # Per-language translations and delivery receipts are persisted on the row.
     translations: dict[str, Any] = field(default_factory=dict)
     delivered_at: float | None = None
     read_at: float | None = None
@@ -174,6 +193,27 @@ class Message:
                 d["receipt"] = "sent"
         return d
 
+    def overlay_for_lang(self, lang: str | None, play_url: str | None = None) -> dict[str, Any]:
+        """Public payload with the viewer's language filled in (groups)."""
+        d = self.to_public(play_url=play_url)
+        if not lang:
+            return d
+        row = (self.translations or {}).get(lang)
+        if row:
+            d["translation"] = row.get("text")
+            d["tgt_lang"] = lang
+            d["translation_provider"] = row.get("provider")
+            d["translation_status"] = row.get("status") or "ok"
+            if row.get("reason"):
+                d["translation_reason"] = row.get("reason")
+        elif self.tgt_lang == lang and self.translation:
+            d["translation_status"] = "ok"
+        else:
+            d["tgt_lang"] = lang
+        if d.get("translation") and d.get("text") and d["translation"] != d["text"]:
+            d["original"] = self.text
+        return d
+
     def to_dict(self) -> dict[str, Any]:
         """Wire shape for ``/api/chat/messages`` (never includes edit history)."""
         return self.to_public()
@@ -192,7 +232,7 @@ class Message:
         return d
 
     def to_admin(self) -> dict[str, Any]:
-        """Admin views must never see note transcripts (owner spec / M11)."""
+        """Admin views must never see message contents (owner spec / M11)."""
         return redact_for_admin(self.to_public())
 
     @classmethod
@@ -211,15 +251,16 @@ class Message:
 
 
 ADMIN_REDACT_FIELDS = (
+    "text", "original_text", "revisions", "translations", "urls", "preview",
     "transcript", "translation", "src_lang", "tgt_lang", "translation_provider",
     "transcript_status", "transcript_reason", "transcript_provider",
     "transcript_model", "transcript_created_at", "transcript_duration",
-    "text", "original_text", "translations", "preview", "urls",
+    "translation_status", "original",
 )
 
 
 def redact_for_admin(public: dict[str, Any]) -> dict[str, Any]:
-    """Strip speech-to-text fields so an admin panel cannot read note text."""
+    """Strip message bodies so an admin panel cannot read dialogs or notes."""
     out = {k: v for k, v in public.items() if k not in ADMIN_REDACT_FIELDS}
     out["transcript_redacted"] = True
     out["content_redacted"] = True

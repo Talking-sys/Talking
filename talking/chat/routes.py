@@ -1,5 +1,6 @@
 """HTTP + WebSocket endpoints for notes + M4 1:1 chat.
 
+Designed for the M4 direct-chat and M6 group extensions.
   GET  /api/chat
   GET/PATCH /api/chat/me
   GET  /api/chat/users
@@ -34,7 +35,17 @@ from talking.security import TokenBucket, client_ip
 from . import PARTIAL
 from .directory import ChatDirectory, NickError, REPORT_REASONS
 from .events import ensure_hub
+from .group_routes import register_group_routes
+from .groups import GroupError
 from .hub import ChatHub
+from .present import (
+    fill_translations,
+    member_limit,
+    public_message,
+    publish_deleted,
+    publish_message,
+    viewer_lang,
+)
 from .media import (
     DownloadTokens, MediaError, MediaLibrary,
     check_media_id, parse_waveform, validate_duration_ms, validate_kind,
@@ -51,11 +62,15 @@ log = logging.getLogger(__name__)
 TEXT_MAX = 500
 
 
-def _http(err: MediaError | ValueError | KeyError | NickError) -> HTTPException:
+def _http(
+    err: MediaError | ValueError | KeyError | GroupError | PermissionError | NickError
+) -> HTTPException:
     if isinstance(err, MediaError):
         return HTTPException(err.status, str(err))
-    if isinstance(err, NickError):
-        return HTTPException(err.status, str(err))
+    if isinstance(err, (GroupError, NickError)):
+        return HTTPException(err.status, getattr(err, "message", str(err)))
+    if isinstance(err, PermissionError):
+        return HTTPException(403, str(err) or "forbidden")
     if isinstance(err, KeyError):
         return HTTPException(404, str(err) or "not found")
     return HTTPException(400, str(err))
@@ -87,9 +102,11 @@ def _play_url(app: FastAPI, msg: Message) -> str | None:
 
 
 def _public_message(app: FastAPI, user_id: str, msg: Message, *, translate: bool = True) -> dict:
+    store: ChatStore = app.state.chat_store
+    if store.is_group(msg.dialog_id):
+        return public_message(app, user_id, msg)
     play = _play_url(app, msg)
     directory: ChatDirectory | None = getattr(app.state, "chat_directory", None)
-    store: ChatStore = app.state.chat_store
     if directory is None or not translate:
         return msg.to_public(play_url=play, viewer_id=user_id)
     auto, tgt, _peer = viewer_context(store, directory, user_id, msg.dialog_id)
@@ -163,6 +180,8 @@ def register_chat(app: FastAPI) -> None:
     def _public_for(uid: str, msg: Message) -> dict:
         return _public_message(app, uid, msg)
 
+    register_group_routes(app)
+
     def _guard_direct(uid: str, dialog_id: str) -> None:
         store: ChatStore = app.state.chat_store
         directory: ChatDirectory = app.state.chat_directory
@@ -175,6 +194,9 @@ def register_chat(app: FastAPI) -> None:
     def _fanout_message(msg: Message) -> None:
         store: ChatStore = app.state.chat_store
         hub: ChatHub = app.state.chat_hub
+        if store.is_group(msg.dialog_id):
+            publish_message(app, msg, actor_id=msg.sender_id)
+            return
         try:
             parts = store.participants(msg.sender_id, msg.dialog_id)
         except (KeyError, ValueError):
@@ -194,6 +216,9 @@ def register_chat(app: FastAPI) -> None:
     def _fanout_deleted(uid: str, dialog_id: str, message_id: str) -> None:
         store: ChatStore = app.state.chat_store
         hub: ChatHub = app.state.chat_hub
+        if store.is_group(dialog_id):
+            publish_deleted(app, dialog_id, message_id, actor_id=uid)
+            return
         try:
             parts = store.participants(uid, dialog_id)
         except (KeyError, ValueError):
@@ -271,8 +296,8 @@ def register_chat(app: FastAPI) -> None:
             "partial": list(PARTIAL),
             "feature": "notes",
             "core": True,
-            "message": "Telegram-style voice_note / video_note plus M4 1:1 chat (nicks, receipts, translation).",
-            "roadmap_m4": "Unique nicks, prefix search, 1:1 dialogs, block, instant translation extend this store.",
+            "message": "Notes, M4 1:1 chat, and M6 groups.",
+            "roadmap_m4": "Nicks, receipts, translation, and groups extend this store.",
             "types": list(MESSAGE_TYPES),
             "limits": {
                 "text_chars": TEXT_MAX,
@@ -281,6 +306,8 @@ def register_chat(app: FastAPI) -> None:
                 "video_max_bytes": s.chat_video_max_bytes,
                 "quota_bytes": s.chat_quota_bytes,
                 "messages_per_min": s.chat_msg_per_min,
+                "group_max_members": member_limit(s, app.state.engine.commercial, uid),
+                "group_trial_max_members": int(getattr(s, "chat_group_trial_max_members", 5) or 5),
             },
             "quota": q,
             "transcription": _transcription_public(uid),
@@ -567,12 +594,20 @@ def register_chat(app: FastAPI) -> None:
                 created_at=time.time(),
                 text=text,
             )
-            src = str(data.get("src_lang") or "") or None
-            if not src:
-                src = app.state.chat_directory.get_profile(uid).native_lang or "en"
-            if src in WHISPER_LANGUAGES:
-                msg.src_lang = src
-            if tgt:
+            if app.state.chat_store.is_group(dialog_id):
+                group = app.state.chat_store.groups.get(dialog_id)
+                src = str(data.get("src_lang") or "") or viewer_lang(
+                    app.state.chat_store, uid, dialog_id,
+                    app.state.engine.store.get("target_lang") or "en",
+                )
+                fill_translations(app, msg, src_lang=src, members=group.members if group else [])
+            else:
+                src = str(data.get("src_lang") or "") or None
+                if not src:
+                    src = app.state.chat_directory.get_profile(uid).native_lang or "en"
+                if src in WHISPER_LANGUAGES:
+                    msg.src_lang = src
+            if tgt and not app.state.chat_store.is_group(dialog_id):
                 try:
                     tr = app.state.engine.translator.translate(text, src or "en", tgt, always=True)
                     msg.src_lang = src or "en"
@@ -675,6 +710,11 @@ def register_chat(app: FastAPI) -> None:
         msg = app.state.chat_store.find_message(uid, message_id)
         if msg is None:
             raise HTTPException(404, "message not found")
+        if app.state.chat_store.is_group(msg.dialog_id) and msg.sender_id != uid:
+            group = app.state.chat_store.groups.get(msg.dialog_id)
+            actor = group.member(uid) if group else None
+            if actor is None or actor.role not in ("owner", "admin"):
+                raise HTTPException(403, "not the author")
         if app.state.chat_store.is_direct(msg.dialog_id) and msg.sender_id != uid:
             raise HTTPException(403, "not the author")
         removed = app.state.chat_store.delete_message(uid, msg.dialog_id, msg.id)
@@ -882,6 +922,10 @@ def register_chat(app: FastAPI) -> None:
                 dialog_id=dialog_id, sender_id=uid, type="text",
                 created_at=time.time(), text=text, src_lang=src,
             )
+            if store.is_group(dialog_id):
+                group = store.groups.get(dialog_id)
+                src = viewer_lang(store, uid, dialog_id, src)
+                fill_translations(app, msg, src_lang=src, members=group.members if group else [])
             store.add_message(uid, msg)
             _fanout_message(msg)
             return
@@ -896,9 +940,30 @@ def register_chat(app: FastAPI) -> None:
         hub: ChatHub = app.state.chat_hub
         hub.subscribe(uid, q)
 
+        def _event_visible(ev: dict) -> bool:
+            if not isinstance(ev, dict):
+                return True
+            msg = ev.get("message") if isinstance(ev.get("message"), dict) else {}
+            dialog_id = (
+                ev.get("group_id")
+                or ev.get("dialog_id")
+                or msg.get("dialog_id")
+                or msg.get("conversation_id")
+            )
+            if ev.get("type") in (
+                "chat.hello", "pong",
+                "chat.group.kicked", "chat.group.left", "chat.group.dissolved",
+            ):
+                return True
+            if dialog_id and app.state.chat_store.is_group(str(dialog_id)):
+                return app.state.chat_store.groups.is_member(str(dialog_id), uid)
+            return True
+
         async def sender():
             while True:
                 ev = await q.get()
+                if not _event_visible(ev):
+                    continue
                 await ws.send_text(json.dumps(ev, ensure_ascii=False))
 
         send_task = asyncio.create_task(sender())

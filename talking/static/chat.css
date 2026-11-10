@@ -59,6 +59,7 @@
   overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0;
 }
 .chat-page { min-height: 100dvh; }
+.chat-page header.top { flex-wrap: wrap; row-gap: 8px; }
 .chat-page .top { flex-wrap: wrap; }
 .chat-page .lang-mini { min-width: 7.5rem; flex: 1 1 8rem; }
 .chat-page .lang-mini select { max-width: none; width: 100%; }
@@ -67,7 +68,35 @@
   color: var(--ink); text-decoration: none; background: #1c2740; font-size: 20px;
 }
 .lang-mini { margin-left: auto; min-width: 0; }
-.lang-mini select { max-width: 42vw; padding: 8px 10px; font-size: 16px; }
+.lang-mini select, .dialog-mini select { max-width: 42vw; padding: 8px 10px; font-size: 16px; }
+.dialog-mini { min-width: 0; }
+.group-btn { margin-left: 4px; }
+.group-panel {
+  position: fixed; right: 0; top: 0; bottom: 0; width: min(100%, 340px);
+  background: #101a30; border-left: 1px solid #2a3654; z-index: 20;
+  padding: 16px; overflow-y: auto; display: grid; gap: 12px; align-content: start;
+}
+.group-panel[hidden] { display: none; }
+.group-panel-head { display: flex; justify-content: space-between; align-items: center; }
+.group-form { display: grid; gap: 8px; }
+.group-form label { display: grid; gap: 4px; font-size: 13px; color: var(--muted); }
+.group-form input {
+  min-height: 40px; border-radius: 10px; border: 1px solid #2a3654;
+  background: #1c2740; color: var(--ink); font: inherit; padding: 8px 10px;
+}
+.group-members { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
+.group-members li {
+  display: flex; justify-content: space-between; gap: 8px; align-items: center;
+  font-size: 13px; background: #142033; border-radius: 10px; padding: 8px 10px;
+}
+.group-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.group-action-btn {
+  min-height: 40px; border-radius: 12px; border: 1px solid #2a3654;
+  background: #14303a; color: var(--teal); font: inherit; cursor: pointer;
+  padding: 8px 12px; width: fit-content;
+}
+.invite-out { font-size: 13px; word-break: break-all; color: var(--teal); }
+.msg .orig-text { color: var(--muted); font-size: 0.95rem; }
 .chat-feed {
   flex: 1; display: flex; flex-direction: column; gap: 12px;
   padding: 8px var(--pad) 8px; overflow-y: auto;
