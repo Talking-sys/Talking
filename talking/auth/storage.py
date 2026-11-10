@@ -20,10 +20,13 @@ from .types import (
 class AuthStorage(Protocol):
     async def create_user(self, user: UserRecord) -> UserRecord: ...
     async def get_user(self, user_id: str) -> UserRecord | None: ...
+    async def get_user_by_nickname(self, nickname: str) -> UserRecord | None: ...
+    async def save_user(self, user: UserRecord) -> UserRecord: ...
     async def create_identity(self, ident: IdentityRecord) -> IdentityRecord: ...
     async def get_identity(self, provider: str, subject: str) -> IdentityRecord | None: ...
     async def get_identity_by_id(self, ident_id: str) -> IdentityRecord | None: ...
     async def list_identities(self, user_id: str) -> list[IdentityRecord]: ...
+    async def save_identity(self, ident: IdentityRecord) -> IdentityRecord: ...
     async def delete_identity(self, ident_id: str) -> bool: ...
     async def create_session(self, sess: SessionRecord) -> SessionRecord: ...
     async def get_session(self, session_id: str) -> SessionRecord | None: ...
@@ -64,6 +67,20 @@ class MemoryAuthStorage:
     async def get_user(self, user_id: str) -> UserRecord | None:
         return self.users.get(user_id)
 
+    async def get_user_by_nickname(self, nickname: str) -> UserRecord | None:
+        want = (nickname or "").strip()
+        if not want:
+            return None
+        for user in self.users.values():
+            if (user.nickname or "") == want:
+                return user
+        return None
+
+    async def save_user(self, user: UserRecord) -> UserRecord:
+        with self._lock:
+            self.users[user.id] = user
+        return user
+
     async def create_identity(self, ident: IdentityRecord) -> IdentityRecord:
         with self._lock:
             for existing in self.identities.values():
@@ -83,6 +100,11 @@ class MemoryAuthStorage:
 
     async def list_identities(self, user_id: str) -> list[IdentityRecord]:
         return [i for i in self.identities.values() if i.user_id == user_id]
+
+    async def save_identity(self, ident: IdentityRecord) -> IdentityRecord:
+        with self._lock:
+            self.identities[ident.id] = ident
+        return ident
 
     async def delete_identity(self, ident_id: str) -> bool:
         with self._lock:
@@ -215,6 +237,31 @@ class PostgresAuthStorage:
             row = await db.get(User, _uuid(user_id))
             return _user_rec(row) if row else None
 
+    async def get_user_by_nickname(self, nickname: str) -> UserRecord | None:
+        from sqlalchemy import select
+        from .models import User
+        want = (nickname or "").strip()
+        if not want:
+            return None
+        async with self._sf() as db:
+            q = await db.execute(select(User).where(User.nickname == want))
+            row = q.scalar_one_or_none()
+            return _user_rec(row) if row else None
+
+    async def save_user(self, user: UserRecord) -> UserRecord:
+        from .models import User
+        async with self._sf() as db:
+            row = await db.get(User, _uuid(user.id))
+            if row is not None:
+                row.status = user.status
+                row.nickname = user.nickname
+                row.native_lang = user.native_lang
+                row.ui_lang = user.ui_lang
+                row.profile_private = user.profile_private
+                row.updated_at = user.updated_at
+                await db.commit()
+        return user
+
     async def create_identity(self, ident: IdentityRecord) -> IdentityRecord:
         from .models import Identity
         async with self._sf() as db:
@@ -250,6 +297,18 @@ class PostgresAuthStorage:
         async with self._sf() as db:
             q = await db.execute(select(Identity).where(Identity.user_id == _uuid(user_id)))
             return [_ident_rec(r) for r in q.scalars().all()]
+
+    async def save_identity(self, ident: IdentityRecord) -> IdentityRecord:
+        from .models import Identity
+        async with self._sf() as db:
+            row = await db.get(Identity, _uuid(ident.id))
+            if row is not None:
+                row.email_hash = ident.email_hash
+                row.email_enc = ident.email_enc
+                row.email_verified = ident.email_verified
+                row.phone_enc = ident.phone_enc
+                await db.commit()
+        return ident
 
     async def delete_identity(self, ident_id: str) -> bool:
         from .models import Identity

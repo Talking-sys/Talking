@@ -1,4 +1,4 @@
-"""M10 auth core (stages 0–2: sessions, phone, email). Google/Apple/passkeys are later."""
+"""M10 auth core (stages 0–2 + phone + Sign in with Apple). Google/passkeys later."""
 from __future__ import annotations
 
 from .deps import UserContext, authenticate_websocket, local_user_id, resolve_user
